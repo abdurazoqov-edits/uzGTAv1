@@ -22,40 +22,45 @@ export interface PlateMountPreset {
   scale: number;
 }
 
-const STORAGE_PREFIX = 'pc_uz_plate_v2_';
+const STORAGE_PREFIX = 'pc_uz_plate_v3_';
 
 export function getDefaultPlatePreset(carName: string, carLength: number): PlateMountPreset {
   const halfLen = carLength * 0.5;
   const lower = carName.toLowerCase();
   if (/cobalt/i.test(lower)) {
     return {
-      frontY: 0.42,
-      frontZ: -halfLen - 0.015,
+      frontY: 0.43,
+      frontZ: -halfLen - 0.014,
       rearY: 0.72,
-      rearZ: halfLen + 0.015,
-      scale: 1.0,
+      rearZ: halfLen + 0.014,
+      scale: 0.96,
     };
   }
   if (/damas/i.test(lower)) {
     return {
       frontY: 0.44,
-      frontZ: -halfLen - 0.02,
+      frontZ: -halfLen - 0.014,
       rearY: 0.54,
-      rearZ: halfLen + 0.02,
-      scale: 0.94,
+      rearZ: halfLen + 0.014,
+      scale: 0.88,
     };
   }
   return {
     frontY: 0.44,
-    frontZ: -halfLen - 0.02,
+    frontZ: -halfLen - 0.014,
     rearY: 0.62,
-    rearZ: halfLen + 0.02,
-    scale: 1.0,
+    rearZ: halfLen + 0.014,
+    scale: 0.96,
   };
 }
 
-export function loadSavedPlateConfig(carKey: string, carName: string, carLength: number): LicensePlateConfig {
-  const preset = getDefaultPlatePreset(carName, carLength);
+export function loadSavedPlateConfig(
+  carKey: string,
+  carName: string,
+  carLength: number,
+  detectedPreset?: PlateMountPreset
+): LicensePlateConfig {
+  const preset = detectedPreset || getDefaultPlatePreset(carName, carLength);
   const fallback: LicensePlateConfig = {
     enabled: true,
     region: '01',

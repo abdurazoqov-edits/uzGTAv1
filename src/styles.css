@@ -379,6 +379,16 @@ body {
   background: rgba(14, 165, 233, 0.16);
 }
 
+.gt-punch {
+  border-color: rgba(251, 146, 60, 0.72);
+  background: rgba(234, 88, 12, 0.22);
+}
+
+.gt-punch:active {
+  background: rgba(239, 68, 68, 0.42);
+  border-color: rgba(254, 202, 202, 0.92);
+}
+
 /* Translucent Vertical Brake & Gas Pedals */
 .pedal-pair {
   display: flex;

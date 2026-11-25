@@ -46,8 +46,6 @@
           <div class="hud-glass-chip">
             <span id="hud-mode-dot" class="mode-dot"></span>
             <span id="hud-car-name" class="hud-title-text">Cobalt</span>
-            <span class="hud-sep">·</span>
-            <span id="hud-checkpoints" class="hud-sub-text">0/12</span>
           </div>
         </div>
 
@@ -147,6 +145,10 @@
 
             <button id="touch-nitro" type="button" class="gt-btn gt-circle gt-nitro car-only" aria-label="Nitro">
               <span class="gt-cap">NOS</span>
+            </button>
+
+            <button id="touch-punch" type="button" class="gt-btn gt-circle gt-punch foot-only hidden" aria-label="Punch">
+              <span class="gt-cap">HIT</span>
             </button>
 
             <button id="touch-sprint" type="button" class="gt-btn gt-circle gt-nitro foot-only hidden" aria-label="Sprint">
@@ -270,6 +272,15 @@
               <button id="btn-import-tashkent" type="button" class="car-mini-btn drive">+ Load tashkent.glb</button>
             </div>
             <input id="file-input-tashkent" type="file" accept=".glb,.gltf" class="hidden" />
+          </div>
+
+          <div class="world-card">
+            <div class="world-card-title">Registon Square (models/registon_opt.glb)</div>
+            <div id="registon-status" class="world-card-sub">Samarqand 2027 Monument · Mountain Front</div>
+            <div class="world-card-actions">
+              <button id="btn-import-registon" type="button" class="car-mini-btn drive">+ Load registon_opt.glb</button>
+            </div>
+            <input id="file-input-registon" type="file" accept=".glb,.gltf" class="hidden" />
           </div>
         </div>
       </div>

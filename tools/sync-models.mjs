@@ -8,6 +8,7 @@ const PUBLIC_MODELS_DIR = path.join(ROOT_DIR, 'public', 'models');
 
 const CHARACTER_RE = /^character(?:[_-].*)?\.glb$/i;
 const TASHKENT_RE = /^(?:tashkent|toshkent|teleminora)(?:[_-].*)?\.glb$/i;
+const REGISTON_RE = /^(?:registon|registan)(?:[_-].*)?\.glb$/i;
 
 function formatCarName(filename) {
   const base = filename
@@ -86,6 +87,7 @@ export async function syncModelsManifest() {
   const cars = [];
   let character = null;
   let landmarkTashkent = null;
+  let landmarkRegiston = null;
 
   for (let i = 0; i < allFileNames.length; i++) {
     const fileName = allFileNames[i];
@@ -119,6 +121,13 @@ export async function syncModelsManifest() {
       continue;
     }
 
+    if (REGISTON_RE.test(fileName)) {
+      if (!landmarkRegiston || /^registon(?:_opt)?\.glb$/i.test(fileName)) {
+        landmarkRegiston = entry;
+      }
+      continue;
+    }
+
     cars.push({
       id: `${slugify(fileName)}_${cars.length + 1}`,
       ...entry,
@@ -127,19 +136,20 @@ export async function syncModelsManifest() {
   }
 
   const manifest = {
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     count: cars.length,
     cars,
     character,
     landmarkTashkent,
+    landmarkRegiston,
   };
 
   const manifestPath = path.join(PUBLIC_MODELS_DIR, 'manifest.json');
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
   console.log(
-    `[sync-models] Discovered ${cars.length} car(s)${character ? ', character.glb' : ''}${landmarkTashkent ? ', tashkent.glb' : ''} -> public/models/manifest.json`
+    `[sync-models] Discovered ${cars.length} car(s)${character ? ', character.glb' : ''}${landmarkTashkent ? ', tashkent.glb' : ''}${landmarkRegiston ? `, ${landmarkRegiston.fileName}` : ''} -> public/models/manifest.json`
   );
   return manifest;
 }

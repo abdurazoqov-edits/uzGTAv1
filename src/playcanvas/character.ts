@@ -1,11 +1,11 @@
 import * as pc from 'playcanvas';
 
-interface RiggedBone {
+export interface RiggedBone {
   node: pc.GraphNode;
   baseEuler: pc.Vec3;
 }
 
-interface HumanoidRig {
+export interface HumanoidRig {
   hips?: RiggedBone;
   spine?: RiggedBone;
   head?: RiggedBone;
@@ -18,6 +18,30 @@ interface HumanoidRig {
   leftForeArm?: RiggedBone;
   rightForeArm?: RiggedBone;
 }
+
+export interface HumanAppearance {
+  skin: [number, number, number];
+  hair: [number, number, number];
+  jacket: [number, number, number];
+  shirt: [number, number, number];
+  pants: [number, number, number];
+  shoes: [number, number, number];
+  hasSunglasses?: boolean;
+  isSwimmer?: boolean;
+  heightScale?: number;
+}
+
+export const DEFAULT_PLAYER_APPEARANCE: HumanAppearance = {
+  skin: [0.85, 0.67, 0.54],
+  hair: [0.10, 0.08, 0.07],
+  jacket: [0.11, 0.16, 0.25], // Dark charcoal-navy leather bomber jacket
+  shirt: [0.93, 0.94, 0.96],  // Crisp white crew tee
+  pants: [0.14, 0.19, 0.29],  // Slim dark indigo denim
+  shoes: [0.94, 0.95, 0.97],  // White athletic sneakers
+  hasSunglasses: true,
+  isSwimmer: false,
+  heightScale: 1.0,
+};
 
 function matchBone(name: string, re: RegExp): boolean {
   return re.test(name.replace(/mixamorig[:_]?/i, ''));
@@ -57,13 +81,20 @@ function hasAnyLimbBones(rig: HumanoidRig): boolean {
 }
 
 /**
- * Builds an articulated athletic humanoid stand-in (smooth capsules/spheres, zero boxy blocks)
- * used until models/character.glb is uploaded.
+ * Builds a realistically proportioned, anatomically sculpted articulated human
+ * (sculpted face/jaw/nose/ears/eyes/brows/hair/sunglasses, athletic chest & shoulders,
+ * jacket + collar + inner shirt + belt + buckle + jeans + sneakers, or swimwear for swimmers).
+ * Used for BOTH the default Player Character and all living City Citizens / Drivers / Swimmers!
  */
-function buildFallbackHumanoid(): { entity: pc.Entity; rig: HumanoidRig } {
-  const root = new pc.Entity('FallbackHumanoid');
+export function buildRealisticHumanEntity(
+  appearance: HumanAppearance = DEFAULT_PLAYER_APPEARANCE,
+  castShadows = true
+): { entity: pc.Entity; rig: HumanoidRig } {
+  const root = new pc.Entity('RealisticHuman');
+  const hScale = appearance.heightScale ?? 1.0;
+  root.setLocalScale(hScale, hScale, hScale);
 
-  const mkMat = (r: number, g: number, b: number, gloss = 0.35, metal = 0.05) => {
+  const mkMat = (r: number, g: number, b: number, gloss = 0.34, metal = 0.04) => {
     const m = new pc.StandardMaterial();
     m.diffuse.set(r, g, b);
     m.useMetalness = true;
@@ -73,80 +104,152 @@ function buildFallbackHumanoid(): { entity: pc.Entity; rig: HumanoidRig } {
     return m;
   };
 
-  const jacketMat = mkMat(0.14, 0.22, 0.34, 0.32, 0.08);
-  const shirtMat = mkMat(0.92, 0.94, 0.96, 0.22, 0.0);
-  const jeansMat = mkMat(0.13, 0.17, 0.25, 0.25, 0.04);
-  const skinMat = mkMat(0.86, 0.69, 0.56, 0.34, 0.0);
-  const hairMat = mkMat(0.11, 0.09, 0.08, 0.38, 0.05);
-  const shoeMat = mkMat(0.94, 0.95, 0.97, 0.45, 0.1);
+  const skinMat = mkMat(appearance.skin[0], appearance.skin[1], appearance.skin[2], 0.36, 0.0);
+  const lipMat = mkMat(appearance.skin[0] * 0.84, appearance.skin[1] * 0.64, appearance.skin[2] * 0.62, 0.42, 0.0);
+  const hairMat = mkMat(appearance.hair[0], appearance.hair[1], appearance.hair[2], 0.36, 0.06);
+  const jacketMat = mkMat(appearance.jacket[0], appearance.jacket[1], appearance.jacket[2], 0.38, 0.08);
+  const shirtMat = mkMat(appearance.shirt[0], appearance.shirt[1], appearance.shirt[2], 0.22, 0.0);
+  const pantsMat = mkMat(appearance.pants[0], appearance.pants[1], appearance.pants[2], 0.24, 0.04);
+  const shoeMat = mkMat(appearance.shoes[0], appearance.shoes[1], appearance.shoes[2], 0.48, 0.08);
+  const soleMat = mkMat(0.14, 0.15, 0.17, 0.28, 0.05);
+  const beltMat = mkMat(0.12, 0.09, 0.07, 0.48, 0.15);
+  const metalMat = mkMat(0.82, 0.84, 0.88, 0.86, 0.88);
+  const eyeWhiteMat = mkMat(0.95, 0.96, 0.98, 0.72, 0.0);
+  const irisMat = mkMat(0.14, 0.11, 0.09, 0.85, 0.05);
+  const glassMat = mkMat(0.05, 0.07, 0.11, 0.96, 0.65);
 
-  const addMesh = (
+  const addPart = (
     parent: pc.Entity,
     name: string,
-    type: 'capsule' | 'sphere' | 'cylinder',
+    type: 'capsule' | 'sphere' | 'cylinder' | 'box',
     pos: [number, number, number],
     scale: [number, number, number],
-    mat: pc.Material
+    mat: pc.Material,
+    rot?: [number, number, number]
   ) => {
     const e = new pc.Entity(name);
     e.setLocalPosition(pos[0], pos[1], pos[2]);
     e.setLocalScale(scale[0], scale[1], scale[2]);
-    e.addComponent('render', { type, material: mat, castShadows: true, receiveShadows: true });
+    if (rot) e.setLocalEulerAngles(rot[0], rot[1], rot[2]);
+    e.addComponent('render', { type, material: mat, castShadows, receiveShadows: true });
     parent.addChild(e);
     return e;
   };
 
+  const isSwim = Boolean(appearance.isSwimmer);
+  const torsoMat = isSwim ? skinMat : jacketMat;
+  const upperArmMat = isSwim ? skinMat : jacketMat;
+  const foreArmMat = isSwim ? skinMat : jacketMat;
+  const thighMat = isSwim ? pantsMat : pantsMat; // Swim trunks on thighs!
+  const calfMat = isSwim ? skinMat : pantsMat;
+  const footMat = isSwim ? skinMat : shoeMat;
+
+  // Pelvis / Hips
   const hips = new pc.Entity('Hips');
   hips.setLocalPosition(0, 0.94, 0);
   root.addChild(hips);
 
-  // Pelvis
-  addMesh(hips, 'Pelvis', 'capsule', [0, 0.0, 0], [0.32, 0.2, 0.22], jeansMat);
+  addPart(hips, 'Pelvis', 'capsule', [0, 0.01, 0], [0.31, 0.19, 0.21], pantsMat);
+  if (!isSwim) {
+    // Leather belt + silver buckle
+    addPart(hips, 'Belt', 'cylinder', [0, 0.075, 0], [0.315, 0.042, 0.22], beltMat);
+    addPart(hips, 'BeltBuckle', 'box', [0, 0.075, -0.108], [0.058, 0.045, 0.018], metalMat);
+  }
 
-  // Spine / Jacket Torso
+  // Spine / Athletic Sculpted Torso (V-taper chest + waist + shoulders + collar)
   const spine = new pc.Entity('Spine');
-  spine.setLocalPosition(0, 0.12, 0);
+  spine.setLocalPosition(0, 0.11, 0);
   hips.addChild(spine);
-  addMesh(spine, 'Torso', 'capsule', [0, 0.22, 0], [0.38, 0.46, 0.23], jacketMat);
-  addMesh(spine, 'InnerShirt', 'capsule', [0, 0.24, -0.05], [0.22, 0.36, 0.16], shirtMat);
 
-  // Neck + Head + Hair
+  // Waist & sculpted chest
+  addPart(spine, 'Waist', 'cylinder', [0, 0.12, 0], [0.29, 0.22, 0.20], torsoMat);
+  addPart(spine, 'ChestUpper', 'capsule', [0, 0.28, 0], [0.39, 0.34, 0.23], torsoMat);
+  // Left & right pectoral contour & shoulder deltoids
+  addPart(spine, 'ShoulderL', 'sphere', [-0.21, 0.38, 0], [0.145, 0.14, 0.145], torsoMat);
+  addPart(spine, 'ShoulderR', 'sphere', [0.21, 0.38, 0], [0.145, 0.14, 0.145], torsoMat);
+
+  if (!isSwim) {
+    // Open jacket front showing inner tee & collar lapels
+    addPart(spine, 'InnerTee', 'capsule', [0, 0.25, -0.052], [0.175, 0.34, 0.155], shirtMat);
+    addPart(spine, 'Collar', 'cylinder', [0, 0.43, 0.01], [0.17, 0.065, 0.16], jacketMat);
+  } else {
+    // Subtle abdominal contour on swimmer
+    addPart(spine, 'PecL', 'sphere', [-0.08, 0.31, -0.085], [0.12, 0.095, 0.07], skinMat);
+    addPart(spine, 'PecR', 'sphere', [0.08, 0.31, -0.085], [0.12, 0.095, 0.07], skinMat);
+  }
+
+  // Neck + Anatomically Sculpted Head (Faces -Z forward!)
   const head = new pc.Entity('Head');
-  head.setLocalPosition(0, 0.49, 0);
+  head.setLocalPosition(0, 0.46, 0);
   spine.addChild(head);
-  addMesh(head, 'Neck', 'cylinder', [0, 0.04, 0], [0.11, 0.1, 0.11], skinMat);
-  addMesh(head, 'HeadBall', 'sphere', [0, 0.17, 0], [0.21, 0.24, 0.22], skinMat);
-  addMesh(head, 'HairCap', 'sphere', [0, 0.21, 0.02], [0.22, 0.18, 0.22], hairMat);
 
-  // Arms (Pivot at shoulder, elbow child)
+  addPart(head, 'Neck', 'cylinder', [0, 0.055, 0.005], [0.105, 0.11, 0.105], skinMat);
+  // Cranium + tapered lower jaw/chin
+  addPart(head, 'Cranium', 'sphere', [0, 0.195, 0.005], [0.195, 0.215, 0.205], skinMat);
+  addPart(head, 'Jaw', 'sphere', [0, 0.135, -0.02], [0.148, 0.125, 0.155], skinMat);
+  // Nose bridge & tip
+  addPart(head, 'Nose', 'capsule', [0, 0.172, -0.102], [0.028, 0.052, 0.036], skinMat, [18, 0, 0]);
+  // Ears
+  addPart(head, 'EarL', 'sphere', [-0.098, 0.175, 0.005], [0.028, 0.052, 0.036], skinMat);
+  addPart(head, 'EarR', 'sphere', [0.098, 0.175, 0.005], [0.028, 0.052, 0.036], skinMat);
+  // Mouth / lips
+  addPart(head, 'Lips', 'capsule', [0, 0.132, -0.093], [0.052, 0.018, 0.022], lipMat, [0, 0, 90]);
+  // Eyes + Eyebrows
+  addPart(head, 'EyeWhiteL', 'sphere', [-0.038, 0.194, -0.088], [0.030, 0.021, 0.018], eyeWhiteMat);
+  addPart(head, 'EyeWhiteR', 'sphere', [0.038, 0.194, -0.088], [0.030, 0.021, 0.018], eyeWhiteMat);
+  addPart(head, 'IrisL', 'sphere', [-0.038, 0.194, -0.096], [0.015, 0.015, 0.012], irisMat);
+  addPart(head, 'IrisR', 'sphere', [0.038, 0.194, -0.096], [0.015, 0.015, 0.012], irisMat);
+  addPart(head, 'BrowL', 'box', [-0.040, 0.214, -0.091], [0.038, 0.011, 0.012], hairMat, [0, 0, 6]);
+  addPart(head, 'BrowR', 'box', [0.040, 0.214, -0.091], [0.038, 0.011, 0.012], hairMat, [0, 0, -6]);
+
+  // Layered Modern Hair Cut
+  addPart(head, 'HairTop', 'sphere', [0, 0.235, 0.014], [0.205, 0.145, 0.215], hairMat);
+  addPart(head, 'HairBack', 'sphere', [0, 0.185, 0.045], [0.185, 0.145, 0.155], hairMat);
+  addPart(head, 'HairFrontSweep', 'capsule', [0.015, 0.242, -0.062], [0.125, 0.058, 0.075], hairMat, [12, 0, -8]);
+
+  // Optional Aviator Sunglasses
+  if (appearance.hasSunglasses && !isSwim) {
+    addPart(head, 'ShadesL', 'box', [-0.040, 0.193, -0.104], [0.056, 0.034, 0.012], glassMat);
+    addPart(head, 'ShadesR', 'box', [0.040, 0.193, -0.104], [0.056, 0.034, 0.012], glassMat);
+    addPart(head, 'ShadesBridge', 'box', [0, 0.198, -0.104], [0.030, 0.008, 0.010], metalMat);
+  }
+
+  // Arms (Pivot at shoulder, elbow child, wrist + hand + thumb)
   const mkArm = (side: -1 | 1, prefix: string) => {
     const arm = new pc.Entity(`${prefix}Arm`);
-    arm.setLocalPosition(side * 0.24, 0.41, 0);
+    arm.setLocalPosition(side * 0.235, 0.375, 0);
     spine.addChild(arm);
-    addMesh(arm, `${prefix}UpperArm`, 'capsule', [0, -0.14, 0], [0.11, 0.3, 0.11], jacketMat);
+    addPart(arm, `${prefix}Bicep`, 'capsule', [0, -0.135, 0], [0.105, 0.29, 0.105], upperArmMat);
 
     const fore = new pc.Entity(`${prefix}ForeArm`);
-    fore.setLocalPosition(0, -0.28, 0);
+    fore.setLocalPosition(0, -0.275, 0);
     arm.addChild(fore);
-    addMesh(fore, `${prefix}LowerArm`, 'capsule', [0, -0.13, 0], [0.095, 0.27, 0.095], jacketMat);
-    addMesh(fore, `${prefix}Hand`, 'sphere', [0, -0.28, 0], [0.085, 0.1, 0.085], skinMat);
+    addPart(fore, `${prefix}LowerArm`, 'capsule', [0, -0.125, 0], [0.088, 0.26, 0.088], foreArmMat);
+    // Exposed wrist & sculpted hand/fist
+    addPart(fore, `${prefix}Wrist`, 'cylinder', [0, -0.245, 0], [0.058, 0.05, 0.058], skinMat);
+    addPart(fore, `${prefix}Hand`, 'capsule', [0, -0.295, -0.01], [0.072, 0.105, 0.055], skinMat);
     return { arm, fore };
   };
   const lArm = mkArm(-1, 'Left');
   const rArm = mkArm(1, 'Right');
 
-  // Legs (Pivot at hip, knee child, sneaker at foot)
+  // Legs (Pivot at hip, knee child, sneaker with rubber sole)
   const mkLeg = (side: -1 | 1, prefix: string) => {
     const up = new pc.Entity(`${prefix}UpLeg`);
-    up.setLocalPosition(side * 0.11, -0.02, 0);
+    up.setLocalPosition(side * 0.105, -0.025, 0);
     hips.addChild(up);
-    addMesh(up, `${prefix}Thigh`, 'capsule', [0, -0.22, 0], [0.145, 0.45, 0.15], jeansMat);
+    addPart(up, `${prefix}Thigh`, 'capsule', [0, -0.215, 0], [0.145, 0.44, 0.148], thighMat);
 
     const low = new pc.Entity(`${prefix}Leg`);
-    low.setLocalPosition(0, -0.44, 0);
+    low.setLocalPosition(0, -0.435, 0);
     up.addChild(low);
-    addMesh(low, `${prefix}Calf`, 'capsule', [0, -0.22, 0], [0.12, 0.44, 0.125], jeansMat);
-    addMesh(low, `${prefix}Sneaker`, 'capsule', [0, -0.44, -0.045], [0.115, 0.12, 0.24], shoeMat);
+    addPart(low, `${prefix}Calf`, 'capsule', [0, -0.215, 0], [0.112, 0.43, 0.118], calfMat);
+    if (!isSwim) {
+      addPart(low, `${prefix}SneakerUpper`, 'capsule', [0, -0.425, -0.045], [0.108, 0.105, 0.235], footMat);
+      addPart(low, `${prefix}SneakerSole`, 'box', [0, -0.468, -0.045], [0.112, 0.028, 0.245], soleMat);
+    } else {
+      addPart(low, `${prefix}Foot`, 'capsule', [0, -0.44, -0.04], [0.09, 0.06, 0.20], skinMat);
+    }
     return { up, low };
   };
   const lLeg = mkLeg(-1, 'Left');
@@ -181,7 +284,7 @@ export class PlayableCharacter {
   public speed = 0;
   public isRunning = false;
   public isCustomGlb = false;
-  public label = 'Default Character';
+  public label = 'Player';
   public flip180 = false;
 
   private activeModel: pc.Entity | null = null;
@@ -192,6 +295,13 @@ export class PlayableCharacter {
   private currentClip = '';
   private gaitPhase = 0;
   private hipsBaseY = 0;
+
+  // Sky look-up pitch & GTA melee combat animation timers
+  private lookPitchDeg = 0;
+  private punchTimer = 0;
+  private punchDuration = 0.34;
+  private punchHandRight = true;
+  private hurtRecoilTimer = 0;
 
   constructor(app: pc.Application) {
     this.app = app;
@@ -218,12 +328,12 @@ export class PlayableCharacter {
 
   private installFallback(): void {
     this.clearActiveModel();
-    const { entity, rig } = buildFallbackHumanoid();
+    const { entity, rig } = buildRealisticHumanEntity(DEFAULT_PLAYER_APPEARANCE, true);
     this.activeModel = entity;
     this.rig = rig;
     this.hipsBaseY = rig.hips ? rig.hips.node.getLocalPosition().y : 0.94;
     this.isCustomGlb = false;
-    this.label = 'Player (Upload character.glb)';
+    this.label = 'Player';
     this.modelHolder.addChild(entity);
   }
 
@@ -269,7 +379,7 @@ export class PlayableCharacter {
     wrapper.addChild(entity);
     this.modelHolder.addChild(wrapper);
 
-    // Measure height & scale cleanly to 1.75m, grounded flush at y = 0
+    // Measure height & scale cleanly to 1.76m, grounded flush at y = 0
     wrapper.getWorldTransform();
     const renderComps = entity.findComponents('render') as pc.RenderComponent[];
     let bounds: pc.BoundingBox | null = null;
@@ -284,7 +394,7 @@ export class PlayableCharacter {
 
     if (bounds) {
       const h = Math.max(0.05, bounds.halfExtents.y * 2);
-      const scale = 1.75 / h;
+      const scale = 1.76 / h;
       entity.setLocalScale(scale, scale, scale);
       wrapper.getWorldTransform();
 
@@ -306,14 +416,12 @@ export class PlayableCharacter {
       }
     }
 
-    // Most Mixamo/RPM glTF characters face +Z; rotate 180° so character faces forward (-Z)
     wrapper.setLocalEulerAngles(0, this.flip180 ? 0 : 180, 0);
 
     this.activeModel = wrapper;
     this.isCustomGlb = true;
     this.label = displayName;
 
-    // 1. Check for embedded glTF skeletal animations (Idle / Walk / Run)
     const animAssets = resource.animations || [];
     if (animAssets.length > 0) {
       try {
@@ -359,7 +467,6 @@ export class PlayableCharacter {
       }
     }
 
-    // 2. Always discover humanoid skeleton bones so even static T-pose/A-pose GLBs animate arms & legs realistically!
     this.rig = discoverHumanoidRig(entity);
     if (this.rig.hips) {
       this.hipsBaseY = this.rig.hips.node.getLocalPosition().y;
@@ -386,6 +493,20 @@ export class PlayableCharacter {
     this.root.setLocalEulerAngles(0, this.yaw, 0);
   }
 
+  /** Tilts character's head upward when player looks up into the sky / Tashkent TV Tower */
+  public setLookPitch(pitchDeg: number): void {
+    this.lookPitchDeg = Math.max(-28, Math.min(54, pitchDeg));
+  }
+
+  public triggerPunch(): void {
+    this.punchHandRight = !this.punchHandRight;
+    this.punchTimer = this.punchDuration;
+  }
+
+  public triggerHitRecoil(): void {
+    this.hurtRecoilTimer = 0.28;
+  }
+
   private switchClip(clip: 'idle' | 'walk' | 'run', speed: number): void {
     if (!this.animComp) return;
     const stateName = this.animNames[clip] || this.animNames.walk || this.animNames.idle;
@@ -401,12 +522,11 @@ export class PlayableCharacter {
     }
   }
 
-  /**
-   * Drives either embedded glTF animations or realistic procedural limb swings (arms, forearms, thighs, knees, hips).
-   */
   public updateAnimation(dt: number, moveSpeed: number, running: boolean): void {
     this.speed = moveSpeed;
     this.isRunning = running;
+    if (this.punchTimer > 0) this.punchTimer = Math.max(0, this.punchTimer - dt);
+    if (this.hurtRecoilTimer > 0) this.hurtRecoilTimer = Math.max(0, this.hurtRecoilTimer - dt);
 
     const moving = moveSpeed > 0.18;
     const speedFactor = Math.min(1.35, moveSpeed / (running ? 7.2 : 3.8));
@@ -419,15 +539,23 @@ export class PlayableCharacter {
       } else {
         this.switchClip('walk', Math.max(0.7, speedFactor));
       }
+      // Subtle visual punch lunge even on embedded anim GLB
+      if (this.punchTimer > 0) {
+        const p = Math.sin((this.punchTimer / this.punchDuration) * Math.PI);
+        this.modelHolder.setLocalEulerAngles(-p * 12, (this.punchHandRight ? -1 : 1) * p * 22, 0);
+      } else if (this.hurtRecoilTimer > 0) {
+        const h = Math.sin((this.hurtRecoilTimer / 0.28) * Math.PI);
+        this.modelHolder.setLocalEulerAngles(h * 16, 0, 0);
+      } else {
+        this.modelHolder.setLocalEulerAngles(0, 0, 0);
+      }
       return;
     }
 
-    // Procedural skeletal gait animation (works on BOTH fallback humanoid AND rigged T-pose/A-pose character.glb!)
     const freq = running ? 11.5 : 7.8;
     if (moving) {
       this.gaitPhase += dt * freq * Math.max(0.55, speedFactor);
     } else {
-      // Smooth idle breathing cycle
       this.gaitPhase += dt * 1.9;
     }
 
@@ -436,7 +564,6 @@ export class PlayableCharacter {
     const amp = moving ? Math.min(1, moveSpeed / 3.4) * (running ? 1.28 : 0.92) : 0;
 
     if (!hasAnyLimbBones(this.rig)) {
-      // Unrigged static statue GLB fallback: subtle rhythmic stride bob & lean so walking feels responsive
       const bob = moving ? Math.abs(s) * 0.09 * amp : Math.sin(this.gaitPhase) * 0.015;
       const sway = moving ? s * 3.8 * amp : 0;
       const lean = moving ? (running ? -8 : -4) * amp : 0;
@@ -457,10 +584,42 @@ export class PlayableCharacter {
     const armSwing = s * 32 * amp;
     const lKnee = Math.max(0, -c) * 44 * amp;
     const rKnee = Math.max(0, c) * 44 * amp;
-    const lElbow = (moving ? 14 + Math.max(0, s) * 26 * amp : 6);
-    const rElbow = (moving ? 14 + Math.max(0, -s) * 26 * amp : 6);
+    let lArmX = -armSwing;
+    let rArmX = armSwing;
+    let lElbow = moving ? 14 + Math.max(0, s) * 26 * amp : 8;
+    let rElbow = moving ? 14 + Math.max(0, -s) * 26 * amp : 8;
 
-    // If it's a T-pose custom GLB, gently lower arms along sides by Z offset when arms start horizontal
+    let torsoTwist = s * 7 * amp;
+    let forwardLean = moving ? (running ? -10 : -4.5) * amp : Math.sin(this.gaitPhase) * 1.1;
+
+    // Punch animation override (snappy forward cross punch!)
+    if (this.punchTimer > 0) {
+      const t = 1 - this.punchTimer / this.punchDuration;
+      const thrust = Math.sin(Math.min(1, t * 1.35) * Math.PI);
+      if (this.punchHandRight) {
+        rArmX = 94 * thrust;
+        rElbow = 12 + (1 - thrust) * 58;
+        lArmX = 36 * thrust;
+        lElbow = 65 * thrust;
+        torsoTwist = 34 * thrust;
+      } else {
+        lArmX = 94 * thrust;
+        lElbow = 12 + (1 - thrust) * 58;
+        rArmX = 36 * thrust;
+        rElbow = 65 * thrust;
+        torsoTwist = -34 * thrust;
+      }
+      forwardLean -= 9 * thrust;
+    }
+
+    // Recoil when punched back by an angry citizen
+    if (this.hurtRecoilTimer > 0) {
+      const h = Math.sin((this.hurtRecoilTimer / 0.28) * Math.PI);
+      forwardLean += 20 * h;
+      lArmX += 24 * h;
+      rArmX += 24 * h;
+    }
+
     const tPoseDrop = this.isCustomGlb ? 52 : 0;
 
     setAdd(this.rig.leftUpLeg, legSwing, 0, 0);
@@ -468,15 +627,15 @@ export class PlayableCharacter {
     setAdd(this.rig.leftLeg, -lKnee, 0, 0);
     setAdd(this.rig.rightLeg, -rKnee, 0, 0);
 
-    setAdd(this.rig.leftArm, -armSwing, 0, tPoseDrop);
-    setAdd(this.rig.rightArm, armSwing, 0, -tPoseDrop);
+    setAdd(this.rig.leftArm, lArmX, 0, tPoseDrop);
+    setAdd(this.rig.rightArm, rArmX, 0, -tPoseDrop);
     setAdd(this.rig.leftForeArm, lElbow, 0, 0);
     setAdd(this.rig.rightForeArm, rElbow, 0, 0);
 
-    const torsoTwist = s * 7 * amp;
-    const forwardLean = moving ? (running ? 10 : 4.5) * amp : Math.sin(this.gaitPhase) * 1.2;
     setAdd(this.rig.spine, forwardLean, torsoTwist, 0);
-    setAdd(this.rig.head, -forwardLean * 0.4, -torsoTwist * 0.5, 0);
+    // Character physically looks UP when camera looks up at the sky / Tashkent TV Tower!
+    const headPitch = this.lookPitchDeg - forwardLean * 0.35;
+    setAdd(this.rig.head, headPitch, -torsoTwist * 0.45, 0);
 
     if (this.rig.hips) {
       const hp = this.rig.hips.node.getLocalPosition();

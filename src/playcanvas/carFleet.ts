@@ -1,10 +1,14 @@
 import * as pc from 'playcanvas';
 import {
   CarLicensePlateRig,
+  getDefaultPlatePreset,
   LicensePlateConfig,
   loadSavedPlateConfig,
+  PlateMountPreset,
   savePlateConfig,
 } from './licensePlate';
+import { createSeatedDriverEntity } from './npcs';
+import { OpenWorldHandle } from './world';
 
 export interface CarManifestItem {
   id: string;
@@ -27,6 +31,7 @@ export interface ModelsManifest {
   cars: CarManifestItem[];
   character?: SpecialAssetManifestItem | null;
   landmarkTashkent?: SpecialAssetManifestItem | null;
+  landmarkRegiston?: SpecialAssetManifestItem | null;
 }
 
 export interface WheelRig {
@@ -39,11 +44,12 @@ export interface WheelRig {
 export interface PlayCanvasCar {
   id: string;
   name: string;
-  source: 'models' | 'builtin' | 'local';
+  source: 'models' | 'local';
   root: pc.Entity;
   tiltPivot: pc.Entity;
   userAdjust: pc.Entity;
   wheels: WheelRig[];
+  nitroFlames: pc.Entity[];
   plateRig: CarLicensePlateRig;
   spawnX: number;
   spawnZ: number;
@@ -61,7 +67,7 @@ export interface PlayCanvasCar {
 export interface CarSummary {
   id: string;
   name: string;
-  source: 'models' | 'builtin' | 'local';
+  source: 'models' | 'local';
   flip180: boolean;
   scaleMul: number;
   wheelCount: number;
@@ -70,15 +76,24 @@ export interface CarSummary {
 
 const TARGET_CAR_LENGTH = 4.45;
 
-// Parked right along the sunlit boulevard facing North toward the Tashkent TV Tower at (0, 0, 29)!
+// Parked right along N Shoreline Blvd facing North toward Tashkent TV Tower at (0, 0, 29)!
 const PARKING_BAYS: Array<{ x: number; z: number; yaw: number }> = [
   { x: 0, z: 60, yaw: 0 },
-  { x: -6.8, z: 62.5, yaw: 10 },
-  { x: 6.8, z: 62.5, yaw: -10 },
-  { x: -13.6, z: 64.5, yaw: 18 },
-  { x: 13.6, z: 64.5, yaw: -18 },
-  { x: -19.5, z: 66.5, yaw: 24 },
-  { x: 19.5, z: 66.5, yaw: -24 },
+  { x: -6.5, z: 62.5, yaw: 8 },
+  { x: 6.5, z: 62.5, yaw: -8 },
+  { x: -12.8, z: 64.5, yaw: 14 },
+  { x: 12.8, z: 64.5, yaw: -14 },
+  { x: -18.5, z: 66.5, yaw: 20 },
+  { x: 18.5, z: 66.5, yaw: -20 },
+];
+
+const TRAFFIC_PLATES: Array<{ region: string; text: string }> = [
+  { region: '01', text: 'B 450 DA' },
+  { region: '01', text: 'C 888 CB' },
+  { region: '10', text: 'M 707 UZ' },
+  { region: '30', text: 'K 505 AA' },
+  { region: '01', text: 'Z 001 ZZ' },
+  { region: '70', text: 'R 321 AB' },
 ];
 
 const HELPER_MESH_RE = /colmesh|collision_?mesh|shadow_?plane|hitbox/i;
@@ -114,118 +129,14 @@ function createShadowPlaneTexture(device: pc.GraphicsDevice): pc.Texture {
   return tex;
 }
 
-/**
- * Builds a sleek PlayCanvas native GT Sports Coupe starter car (forward = -Z, grounded at y = 0).
- */
-function buildStarterGtEntity(): { model: pc.Entity; wheels: WheelRig[] } {
-  const model = new pc.Entity('CampusGT_Model');
-  const wheels: WheelRig[] = [];
-
-  const mkMat = (
-    r: number,
-    g: number,
-    b: number,
-    metalness: number,
-    gloss: number,
-    emissive?: [number, number, number]
-  ) => {
-    const m = new pc.StandardMaterial();
-    m.diffuse.set(r, g, b);
-    m.useMetalness = true;
-    m.metalness = metalness;
-    m.gloss = gloss;
-    if (emissive) {
-      m.emissive.set(emissive[0], emissive[1], emissive[2]);
-      m.emissiveIntensity = 1.8;
-    }
-    m.update();
-    return m;
-  };
-
-  const paintMat = mkMat(0.11, 0.34, 0.88, 0.72, 0.88);
-  const darkTrimMat = mkMat(0.1, 0.12, 0.16, 0.35, 0.55);
-  const glassMat = mkMat(0.08, 0.14, 0.24, 0.25, 0.96);
-  const tireMat = mkMat(0.1, 0.11, 0.13, 0.05, 0.22);
-  const alloyMat = mkMat(0.84, 0.88, 0.92, 0.92, 0.88);
-  const headMat = mkMat(1, 0.98, 0.92, 0.1, 0.8, [1, 0.95, 0.82]);
-  const tailMat = mkMat(0.9, 0.12, 0.12, 0.1, 0.8, [1, 0.14, 0.12]);
-
-  const addPart = (
-    name: string,
-    type: 'box' | 'cylinder',
-    pos: [number, number, number],
-    scale: [number, number, number],
-    mat: pc.Material,
-    rot?: [number, number, number]
-  ) => {
-    const e = new pc.Entity(name);
-    e.setLocalPosition(pos[0], pos[1], pos[2]);
-    e.setLocalScale(scale[0], scale[1], scale[2]);
-    if (rot) e.setLocalEulerAngles(rot[0], rot[1], rot[2]);
-    e.addComponent('render', { type, material: mat, castShadows: true, receiveShadows: true });
-    model.addChild(e);
-    return e;
-  };
-
-  addPart('ChassisMain', 'box', [0, 0.56, 0], [1.92, 0.54, 4.35], paintMat);
-  addPart('FrontSplitter', 'box', [0, 0.26, -2.08], [1.96, 0.1, 0.42], darkTrimMat);
-  addPart('RearDiffuser', 'box', [0, 0.28, 2.1], [1.86, 0.18, 0.3], darkTrimMat);
-  addPart('CabinGlass', 'box', [0, 1.04, 0.18], [1.52, 0.48, 2.05], glassMat);
-  addPart('CabinRoof', 'box', [0, 1.29, 0.24], [1.46, 0.08, 1.55], paintMat);
-  addPart('SpoilerBlade', 'box', [0, 1.12, 2.02], [1.88, 0.06, 0.28], darkTrimMat);
-  addPart('SpoilerStrutL', 'box', [-0.58, 0.95, 1.98], [0.06, 0.28, 0.18], darkTrimMat);
-  addPart('SpoilerStrutR', 'box', [0.58, 0.95, 1.98], [0.06, 0.28, 0.18], darkTrimMat);
-  addPart('HeadlightL', 'box', [-0.66, 0.64, -2.17], [0.42, 0.1, 0.08], headMat);
-  addPart('HeadlightR', 'box', [0.66, 0.64, -2.17], [0.42, 0.1, 0.08], headMat);
-  addPart('TailBar', 'box', [0, 0.72, 2.18], [1.72, 0.1, 0.08], tailMat);
-
-  const wheelCoords: Array<{ name: string; x: number; z: number; isFront: boolean }> = [
-    { name: 'Wheel_FL', x: -0.94, z: -1.34, isFront: true },
-    { name: 'Wheel_FR', x: 0.94, z: -1.34, isFront: true },
-    { name: 'Wheel_RL', x: -0.95, z: 1.34, isFront: false },
-    { name: 'Wheel_RR', x: 0.95, z: 1.34, isFront: false },
-  ];
-
-  for (const wc of wheelCoords) {
-    const steerPivot = new pc.Entity(`${wc.name}_Steer`);
-    steerPivot.setLocalPosition(wc.x, 0.36, wc.z);
-    model.addChild(steerPivot);
-
-    const spinPivot = new pc.Entity(`${wc.name}_Spin`);
-    steerPivot.addChild(spinPivot);
-
-    const tire = new pc.Entity(`${wc.name}_Tire`);
-    tire.setLocalEulerAngles(0, 0, 90);
-    tire.setLocalScale(0.72, 0.26, 0.72);
-    tire.addComponent('render', { type: 'cylinder', material: tireMat, castShadows: true });
-    spinPivot.addChild(tire);
-
-    const rim = new pc.Entity(`${wc.name}_Rim`);
-    rim.setLocalEulerAngles(0, 0, 90);
-    rim.setLocalScale(0.46, 0.28, 0.46);
-    rim.addComponent('render', { type: 'cylinder', material: alloyMat });
-    spinPivot.addChild(rim);
-
-    // Visual spoke bar so rotation is unmistakably clear!
-    const spoke = new pc.Entity(`${wc.name}_Spoke`);
-    spoke.setLocalScale(0.29, 0.44, 0.08);
-    spoke.addComponent('render', { type: 'box', material: darkTrimMat });
-    spinPivot.addChild(spoke);
-
-    wheels.push({ steerPivot, spinPivot, isFront: wc.isFront, radius: 0.36 });
-  }
-
-  return { model, wheels };
-}
-
 // ============================================================================
-// REAL WHEEL EXTRACTION ENGINE (Supports GPU Instanced, Merged 4-Wheel, & Named Wheels!)
+// REAL WHEEL EXTRACTION ENGINE
+// Handles:
+//   1) GPU-Instanced multi-part wheels (e.g. cobalt_opt.glb with 10..16 instances!)
+//   2) Merged 4-wheel meshes (e.g. damas_opt.glb Object_11!)
+//   3) Individual named wheel nodes (wheel_fl, tire_fr, etc.)
 // ============================================================================
 
-/**
- * Creates a new pc.Mesh from an existing MeshInstance, with vertices pre-baked into
- * wrapper-relative coordinates centered around `(centerX, centerY, centerZ)`.
- */
 function buildCenteredSubMesh(
   device: pc.GraphicsDevice,
   srcMesh: pc.Mesh,
@@ -244,10 +155,6 @@ function buildCenteredSubMesh(
   const numUvs = srcMesh.getUvs(0, uvArr);
   const numIdx = srcMesh.getIndices(idxArr);
 
-  // Build normal matrix (inverse transpose of upper 3x3)
-  const normMat = new pc.Mat3();
-  normMat.setFromMat4(toWrapperMat);
-  // Check determinant for negative-scale mirroring (common on mirrored right-side wheels!)
   const det =
     toWrapperMat.data[0] * (toWrapperMat.data[5] * toWrapperMat.data[10] - toWrapperMat.data[6] * toWrapperMat.data[9]) -
     toWrapperMat.data[1] * (toWrapperMat.data[4] * toWrapperMat.data[10] - toWrapperMat.data[6] * toWrapperMat.data[8]) +
@@ -349,8 +256,8 @@ function buildCenteredSubMesh(
 }
 
 /**
- * Strategy 1: Extract GPU-Instanced 4-wheel parts (like cobalt_opt.glb nodes 6, 7, 8, 9!)
- * into 4 real independent SteerPivot -> SpinPivot assemblies!
+ * Strategy 1: Extract GPU-Instanced wheel meshes (supports ANY instance count 4..48, e.g. Cobalt's 10..16 instances!)
+ * Deduplicates overlapping identical transforms per wheel corner and builds 4 true SteerPivot -> SpinPivot wheels!
  */
 function extractGpuInstancedWheels(
   device: pc.GraphicsDevice,
@@ -361,7 +268,14 @@ function extractGpuInstancedWheels(
   for (const rc of renderComps) {
     if (!rc.enabled || !rc.entity.enabled) continue;
     for (const mi of rc.meshInstances) {
-      if (mi.instancingData && mi.instancingData.count === 4 && mi.instancingData.vertexBuffer) {
+      if (
+        mi.instancingData &&
+        mi.instancingData.count >= 4 &&
+        mi.instancingData.count <= 48 &&
+        mi.instancingData.vertexBuffer &&
+        mi.mesh &&
+        mi.material
+      ) {
         instancedMis.push({ rc, mi });
       }
     }
@@ -370,23 +284,28 @@ function extractGpuInstancedWheels(
 
   const invWrapper = wrapper.getWorldTransform().clone().invert();
   interface WheelPart {
-    mi: pc.MeshInstance;
+    mesh: pc.Mesh;
+    material: pc.Material;
     toWrapper: pc.Mat4;
-    worldCenter: pc.Vec3;
     radius: number;
   }
 
-  // Group all instanced wheel parts (tire, rim, brake disc, hub cap) into 4 corner buckets
-  const buckets = new Map<string, { parts: WheelPart[]; sumPos: pc.Vec3; count: number; maxRadius: number }>();
+  const buckets = new Map<
+    string,
+    { parts: WheelPart[]; seenKeys: Set<string>; sumPos: pc.Vec3; count: number; maxRadius: number }
+  >();
   const instMat = new pc.Mat4();
   const nodeWorld = new pc.Mat4();
   const combined = new pc.Mat4();
   const meshCenter = new pc.Vec3();
+  const scaleVec = new pc.Vec3();
+  const usedMis: pc.MeshInstance[] = [];
 
   for (const { mi } of instancedMis) {
     const srcMesh = mi.mesh;
     const srcMat = mi.material;
     if (!srcMesh || !srcMat) continue;
+
     const vb = mi.instancingData!.vertexBuffer!;
     const locked = vb.lock();
     const floats =
@@ -399,44 +318,65 @@ function extractGpuInstancedWheels(
     nodeWorld.copy(mi.node.getWorldTransform());
     const localBox = srcMesh.aabb;
 
+    // Verify instances actually sit in the lower wheel zone (y < 1.1m) before claiming this MeshInstance
+    let wheelLikeCount = 0;
+    const parsed: Array<{ key: string; mat: pc.Mat4; center: pc.Vec3; radius: number; sig: string }> = [];
+
     for (let k = 0; k < count; k++) {
       const off = k * 16;
       if (off + 15 >= floats.length) break;
       instMat.data.set(floats.subarray(off, off + 16));
 
-      // Combined matrix from mesh local -> wrapper local
       combined.mul2(nodeWorld, instMat);
       combined.mul2(invWrapper, combined);
 
       meshCenter.copy(localBox.center);
       combined.transformPoint(meshCenter, meshCenter);
 
-      const scaleVec = new pc.Vec3();
       combined.getScale(scaleVec);
       const radius = Math.max(
+        localBox.halfExtents.x * Math.abs(scaleVec.x),
         localBox.halfExtents.y * Math.abs(scaleVec.y),
         localBox.halfExtents.z * Math.abs(scaleVec.z)
       );
 
-      const key = `${meshCenter.x < 0 ? 'L' : 'R'}_${meshCenter.z < 0 ? 'F' : 'R'}`;
-      let b = buckets.get(key);
-      if (!b) {
-        b = { parts: [], sumPos: new pc.Vec3(), count: 0, maxRadius: 0.34 };
-        buckets.set(key, b);
+      if (meshCenter.y < 1.15 && Math.abs(meshCenter.x) > 0.35 && Math.abs(meshCenter.z) > 0.55) {
+        wheelLikeCount++;
+        const key = `${meshCenter.x < 0 ? 'L' : 'R'}_${meshCenter.z < 0 ? 'F' : 'R'}`;
+        // Deduplication signature for identical matrix instances on the same mesh
+        const sig = `${srcMesh.id}_${Math.round(combined.data[12] * 50)}_${Math.round(combined.data[13] * 50)}_${Math.round(combined.data[14] * 50)}_${Math.round(combined.data[0] * 20)}_${Math.round(combined.data[5] * 20)}_${Math.round(combined.data[10] * 20)}`;
+        parsed.push({ key, mat: combined.clone(), center: meshCenter.clone(), radius, sig });
       }
-      b.parts.push({
-        mi,
-        toWrapper: combined.clone(),
-        worldCenter: meshCenter.clone(),
-        radius,
-      });
-      b.sumPos.add(meshCenter);
-      b.count += 1;
-      if (radius > b.maxRadius) b.maxRadius = radius;
     }
     vb.unlock();
 
-    // Hide the original GPU-instanced draw so our 4 rigged wheels take over cleanly!
+    if (wheelLikeCount < 4) continue;
+
+    for (const item of parsed) {
+      let b = buckets.get(item.key);
+      if (!b) {
+        b = { parts: [], seenKeys: new Set(), sumPos: new pc.Vec3(), count: 0, maxRadius: 0.34 };
+        buckets.set(item.key, b);
+      }
+      if (b.seenKeys.has(item.sig)) continue;
+      b.seenKeys.add(item.sig);
+
+      b.parts.push({
+        mesh: srcMesh,
+        material: srcMat,
+        toWrapper: item.mat,
+        radius: item.radius,
+      });
+      b.sumPos.add(item.center);
+      b.count += 1;
+      if (item.radius > b.maxRadius) b.maxRadius = item.radius;
+    }
+    usedMis.push(mi);
+  }
+
+  if (buckets.size < 4) return [];
+
+  for (const mi of usedMis) {
     mi.visible = false;
   }
 
@@ -454,11 +394,10 @@ function extractGpuInstancedWheels(
 
     for (let p = 0; p < bucket.parts.length; p++) {
       const part = bucket.parts[p];
-      if (!part.mi.mesh || !part.mi.material) continue;
-      const built = buildCenteredSubMesh(device, part.mi.mesh, part.toWrapper, center);
+      const built = buildCenteredSubMesh(device, part.mesh, part.toWrapper, center);
       if (!built) continue;
       const partEnt = new pc.Entity(`Wheel_${key}_Part_${p}`);
-      const newMi = new pc.MeshInstance(built.mesh, part.mi.material);
+      const newMi = new pc.MeshInstance(built.mesh, part.material);
       partEnt.addComponent('render', {
         meshInstances: [newMi],
         castShadows: true,
@@ -479,7 +418,7 @@ function extractGpuInstancedWheels(
 }
 
 /**
- * Strategy 2: Split a merged 4-wheel mesh (like damas_opt.glb Object_11!) into 4 centered
+ * Strategy 2: Split a merged 4-wheel mesh (e.g. damas_opt.glb Object_11!) into 4 centered
  * corner wheels (`FL, FR, RL, RR`) wrapped in SteerPivot -> SpinPivot!
  */
 function extractMergedFourCornerWheels(
@@ -493,8 +432,12 @@ function extractMergedFourCornerWheels(
   const toWrapper = new pc.Mat4();
   const tmpP = new pc.Vec3();
 
-  // Look for a low-riding mesh whose vertices cluster neatly into all 4 corners (FL, FR, RL, RR)
-  let bestCandidate: { mi: pc.MeshInstance; toWrapper: pc.Mat4; cornerCenters: Record<string, pc.Vec3>; radius: number } | null = null;
+  let bestCandidate: {
+    mi: pc.MeshInstance;
+    toWrapper: pc.Mat4;
+    cornerCenters: Record<string, pc.Vec3>;
+    radius: number;
+  } | null = null;
 
   for (const rc of renderComps) {
     if (!rc.enabled || !rc.entity.enabled) continue;
@@ -506,12 +449,9 @@ function extractMergedFourCornerWheels(
       const nVerts = mi.mesh.getPositions(posArr);
       if (nVerts < 48) continue;
 
-      let minY = Infinity;
-      let maxY = -Infinity;
-      let minX = Infinity;
-      let maxX = -Infinity;
-      let minZ = Infinity;
-      let maxZ = -Infinity;
+      let minY = Infinity, maxY = -Infinity;
+      let minX = Infinity, maxX = -Infinity;
+      let minZ = Infinity, maxZ = -Infinity;
 
       const cornerMin: Record<string, pc.Vec3> = {
         LF: new pc.Vec3(Infinity, Infinity, Infinity),
@@ -538,7 +478,6 @@ function extractMergedFourCornerWheels(
         if (tmpP.z < minZ) minZ = tmpP.z;
         if (tmpP.z > maxZ) maxZ = tmpP.z;
 
-        // Wheel vertices stay away from centerline X=0 and center Z=0
         if (Math.abs(tmpP.x) < carWidth * 0.14 || Math.abs(tmpP.z) < carLength * 0.12) {
           midBandVerts++;
         }
@@ -553,11 +492,6 @@ function extractMergedFourCornerWheels(
       const spanY = maxY - minY;
       const spanZ = maxZ - minZ;
 
-      // Signature of a merged 4-wheel tire/rim mesh:
-      // 1) Low to the ground (minY < 0.25, maxY < 1.05, spanY between 0.35 and 0.95)
-      // 2) Spans both sides & both axles (spanX > 65% carWidth, spanZ > 45% carLength)
-      // 3) Almost zero vertices in the middle X/Z gap between wheels (< 5% of vertices)
-      // 4) All 4 corners populated with balanced wheel geometry!
       const isWheelHeight = minY < 0.28 && maxY < 1.08 && spanY > 0.32 && spanY < 0.95;
       const isWideSpan = spanX > carWidth * 0.62 && spanZ > carLength * 0.42;
       const hasCleanGap = midBandVerts / nVerts < 0.06;
@@ -581,8 +515,10 @@ function extractMergedFourCornerWheels(
     if (bestCandidate) break;
   }
 
-  if (!bestCandidate) return [];
+  if (!bestCandidate || !bestCandidate.mi.mesh || !bestCandidate.mi.material) return [];
 
+  const candMesh = bestCandidate.mi.mesh;
+  const candMat = bestCandidate.mi.material;
   const rigs: WheelRig[] = [];
   const corners: Array<{ key: string; wantNegX: boolean; wantNegZ: boolean; isFront: boolean }> = [
     { key: 'LF', wantNegX: true, wantNegZ: true, isFront: true },
@@ -590,10 +526,6 @@ function extractMergedFourCornerWheels(
     { key: 'LR', wantNegX: true, wantNegZ: false, isFront: false },
     { key: 'RR', wantNegX: false, wantNegZ: false, isFront: false },
   ];
-
-  const candMesh = bestCandidate.mi.mesh;
-  const candMat = bestCandidate.mi.material;
-  if (!candMesh || !candMat) return [];
 
   for (const c of corners) {
     const center = bestCandidate.cornerCenters[c.key];
@@ -641,7 +573,7 @@ function extractMergedFourCornerWheels(
 }
 
 /**
- * Strategy 3: Individual named wheel entities (`Wheel_FL`, `Tire_FR`, etc.) re-centered cleanly into SteerPivot -> SpinPivot.
+ * Strategy 3: Individual named wheel entities (`Wheel_FL`, `Tire_FR`, etc.)
  */
 function extractNamedWheelEntities(
   device: pc.GraphicsDevice,
@@ -709,7 +641,7 @@ function extractNamedWheelEntities(
 }
 
 // ============================================================================
-// Car Fleet Manager
+// Car Fleet Manager (Real User .glb Cars ONLY — Blue Boxy Car Removed!)
 // ============================================================================
 export class PlayCanvasCarFleet {
   public readonly app: pc.Application;
@@ -718,16 +650,19 @@ export class PlayCanvasCarFleet {
   public activeCarId: string | null = null;
   public manifestCharacter: SpecialAssetManifestItem | null = null;
   public manifestTashkent: SpecialAssetManifestItem | null = null;
+  public manifestRegiston: SpecialAssetManifestItem | null = null;
 
   private shadowMat: pc.StandardMaterial;
+  private nitroOuterMat: pc.StandardMaterial;
+  private nitroCoreMat: pc.StandardMaterial;
   private localCounter = 0;
+  private loadedContainers = new Map<string, { resource: pc.ContainerResource; name: string }>();
 
   constructor(app: pc.Application) {
     this.app = app;
     this.root = new pc.Entity('CarFleetRoot');
     this.app.root.addChild(this.root);
 
-    // Offline Draco WASM decoder bundled inside /public/draco/gltf/
     try {
       const base = typeof window !== 'undefined' ? window.location.href : '';
       const jsUrl = base ? new URL('./draco/gltf/draco_wasm_wrapper.js', base).href : './draco/gltf/draco_wasm_wrapper.js';
@@ -754,6 +689,28 @@ export class PlayCanvasCarFleet {
     sm.useFog = false;
     sm.update();
     this.shadowMat = sm;
+
+    const nOuter = new pc.StandardMaterial();
+    nOuter.diffuse.set(0.15, 0.68, 1.0);
+    nOuter.emissive.set(0.22, 0.78, 1.0);
+    nOuter.emissiveIntensity = 3.2;
+    nOuter.opacity = 0.78;
+    nOuter.blendType = pc.BLEND_ADDITIVE;
+    nOuter.depthWrite = false;
+    nOuter.useLighting = false;
+    nOuter.update();
+    this.nitroOuterMat = nOuter;
+
+    const nCore = new pc.StandardMaterial();
+    nCore.diffuse.set(1.0, 0.94, 0.75);
+    nCore.emissive.set(1.0, 0.86, 0.45);
+    nCore.emissiveIntensity = 4.0;
+    nCore.opacity = 0.92;
+    nCore.blendType = pc.BLEND_ADDITIVE;
+    nCore.depthWrite = false;
+    nCore.useLighting = false;
+    nCore.update();
+    this.nitroCoreMat = nCore;
   }
 
   private getBay(idx: number): { x: number; z: number; yaw: number } {
@@ -766,11 +723,78 @@ export class PlayCanvasCarFleet {
     };
   }
 
+  /**
+   * Scans actual center-strip bumper vertices (`|x| < 0.25m`) in normalized wrapper space
+   * so front and rear Uzbekistan license plates snap FLUSH onto the exact bumper surface of
+   * Cobalt, Damas, and ANY uploaded .glb car!
+   */
+  private detectBumperPlateMounts(
+    wrapper: pc.Entity,
+    renderComps: pc.RenderComponent[],
+    carName: string,
+    carLength: number
+  ): PlateMountPreset {
+    const base = getDefaultPlatePreset(carName, carLength);
+    wrapper.getWorldTransform();
+    const invWrapper = wrapper.getWorldTransform().clone().invert();
+    const toWrapper = new pc.Mat4();
+    const p = new pc.Vec3();
+
+    const frontTargetY = base.frontY;
+    const rearTargetY = base.rearY;
+    let bestFrontZ = Infinity;
+    let bestRearZ = -Infinity;
+    let anyFront = false;
+    let anyRear = false;
+
+    for (const rc of renderComps) {
+      if (!rc.enabled || !rc.entity.enabled) continue;
+      for (const mi of rc.meshInstances) {
+        if (!mi.visible || !mi.mesh || mi.instancingData) continue;
+        const pos: number[] = [];
+        const nVerts = mi.mesh.getPositions(pos);
+        if (nVerts < 3) continue;
+        toWrapper.mul2(invWrapper, mi.node.getWorldTransform());
+        const step = nVerts > 6000 ? 2 : 1;
+
+        for (let i = 0; i < nVerts; i += step) {
+          p.set(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+          toWrapper.transformPoint(p, p);
+          if (Math.abs(p.x) > 0.24) continue;
+
+          // Front bumper strip around target front plate height
+          if (p.z < -carLength * 0.28 && Math.abs(p.y - frontTargetY) < 0.14) {
+            if (p.z < bestFrontZ) {
+              bestFrontZ = p.z;
+              anyFront = true;
+            }
+          }
+          // Rear bumper/trunk strip around target rear plate height
+          if (p.z > carLength * 0.28 && Math.abs(p.y - rearTargetY) < 0.16) {
+            if (p.z > bestRearZ) {
+              bestRearZ = p.z;
+              anyRear = true;
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      frontY: frontTargetY,
+      frontZ: anyFront ? Number((bestFrontZ - 0.018).toFixed(2)) : Number(base.frontZ.toFixed(2)),
+      rearY: rearTargetY,
+      rearZ: anyRear ? Number((bestRearZ + 0.018).toFixed(2)) : Number(base.rearZ.toFixed(2)),
+      scale: base.scale,
+    };
+  }
+
   private normalizeGlbEntity(rawEntity: pc.Entity, carName: string): {
     wrapper: pc.Entity;
     wheels: WheelRig[];
     width: number;
     length: number;
+    detectedPlate: PlateMountPreset;
   } {
     const wrapper = new pc.Entity('NormalizedGlbWrapper');
     const orientGroup = new pc.Entity('CarOrientGroup');
@@ -792,8 +816,7 @@ export class PlayCanvasCarFleet {
       for (const mi of rc.meshInstances) {
         const mat = mi.material;
         if (mat instanceof pc.StandardMaterial) {
-          // Ensure car paint responds vividly to HDR environment lighting
-          mat.envAtlas = null; // inherit scene.envAtlas
+          mat.envAtlas = null;
           if (mat.gloss < 0.35 && !/tire|rubber|wheel|seat|interior/i.test(mat.name || '')) {
             mat.gloss = Math.max(mat.gloss, 0.52);
           }
@@ -826,8 +849,9 @@ export class PlayCanvasCarFleet {
       const scale = targetLen / maxHoriz;
       orientGroup.setLocalScale(scale, scale, scale);
 
+      // Align long axis along -Z (forward). For X-aligned cars like Damas (front at -X), -90 deg sends -X -> -Z!
       if (sizeX > sizeZ * 1.12) {
-        orientGroup.setLocalEulerAngles(0, 90, 0);
+        orientGroup.setLocalEulerAngles(0, -90, 0);
       }
 
       const scaledBounds = computeVisibleBounds(orientGroup);
@@ -841,7 +865,7 @@ export class PlayCanvasCarFleet {
     const width = finalBounds ? Math.max(1.35, Math.min(2.5, finalBounds.halfExtents.x * 2)) : 1.9;
     const length = finalBounds ? Math.max(2.8, Math.min(5.8, finalBounds.halfExtents.z * 2)) : 4.45;
 
-    // 2. REAL WHEEL EXTRACTION (Spin + Front Steering!)
+    // 2. REAL WHEEL EXTRACTION (Spin + Front Steering for Cobalt, Damas & all future GLBs!)
     wrapper.getWorldTransform();
     let wheels = extractGpuInstancedWheels(this.app.graphicsDevice, wrapper, renderComps);
     if (wheels.length < 4) {
@@ -859,18 +883,62 @@ export class PlayCanvasCarFleet {
       if (named.length > 0) wheels = named;
     }
 
+    // 3. Auto-detect exact front & rear bumper surface vertices for flush UZ license plates!
+    const detectedPlate = this.detectBumperPlateMounts(wrapper, renderComps, carName, length);
+
     this.app.root.removeChild(wrapper);
-    return { wrapper, wheels, width, length };
+    return { wrapper, wheels, width, length, detectedPlate };
+  }
+
+  private buildExhaustNitroFlames(parentWrapper: pc.Entity, carWidth: number, carLength: number): pc.Entity[] {
+    const flames: pc.Entity[] = [];
+    const offsets = [-carWidth * 0.25, carWidth * 0.25];
+    const exhaustZ = carLength * 0.5 + 0.08;
+
+    for (let i = 0; i < offsets.length; i++) {
+      const flameGroup = new pc.Entity(`NitroExhaust_${i}`);
+      flameGroup.setLocalPosition(offsets[i], 0.30, exhaustZ);
+      flameGroup.enabled = false;
+
+      const outer = new pc.Entity('FlameOuter');
+      outer.setLocalPosition(0, 0, 0.38);
+      outer.setLocalEulerAngles(90, 0, 0);
+      outer.setLocalScale(0.18, 0.85, 0.18);
+      outer.addComponent('render', {
+        type: 'cone',
+        material: this.nitroOuterMat,
+        castShadows: false,
+        receiveShadows: false,
+      });
+      flameGroup.addChild(outer);
+
+      const core = new pc.Entity('FlameCore');
+      core.setLocalPosition(0, 0, 0.22);
+      core.setLocalEulerAngles(90, 0, 0);
+      core.setLocalScale(0.10, 0.48, 0.10);
+      core.addComponent('render', {
+        type: 'cone',
+        material: this.nitroCoreMat,
+        castShadows: false,
+        receiveShadows: false,
+      });
+      flameGroup.addChild(core);
+
+      parentWrapper.addChild(flameGroup);
+      flames.push(flameGroup);
+    }
+    return flames;
   }
 
   private registerCarEntity(opts: {
     id: string;
     name: string;
-    source: 'models' | 'builtin' | 'local';
+    source: 'models' | 'local';
     modelWrapper: pc.Entity;
     wheels: WheelRig[];
     width: number;
     length: number;
+    detectedPlate: PlateMountPreset;
   }): PlayCanvasCar {
     const bay = this.getBay(this.cars.length);
 
@@ -884,12 +952,11 @@ export class PlayCanvasCarFleet {
     tiltPivot.addChild(userAdjust);
     root.addChild(tiltPivot);
 
-    // Mount crisp, editable Uzbekistan License Plate (front & rear bumper slots!)
     const plateKey = opts.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-    const plateCfg = loadSavedPlateConfig(plateKey, opts.name, opts.length);
+    const plateCfg = loadSavedPlateConfig(plateKey, opts.name, opts.length, opts.detectedPlate);
     const plateRig = new CarLicensePlateRig(this.app.graphicsDevice, opts.modelWrapper, plateCfg);
+    const nitroFlames = this.buildExhaustNitroFlames(opts.modelWrapper, opts.width, opts.length);
 
-    // Contact shadow plane under car
     const shadowPlane = new pc.Entity('CarContactShadow');
     shadowPlane.setLocalPosition(0, 0.03, 0);
     shadowPlane.setLocalScale(opts.width * 1.32, 1, opts.length * 1.18);
@@ -911,6 +978,7 @@ export class PlayCanvasCarFleet {
       tiltPivot,
       userAdjust,
       wheels: opts.wheels,
+      nitroFlames,
       plateRig,
       spawnX: bay.x,
       spawnZ: bay.z,
@@ -928,7 +996,7 @@ export class PlayCanvasCarFleet {
     return car;
   }
 
-  private loadGlbUrl(url: string, name: string): Promise<pc.Entity> {
+  private loadGlbContainer(url: string, name: string): Promise<pc.ContainerResource> {
     return new Promise((resolve, reject) => {
       const asset = new pc.Asset(name, 'container', { url });
       asset.once('load', () => {
@@ -937,11 +1005,7 @@ export class PlayCanvasCarFleet {
           reject(new Error(`Empty GLB container for ${name}`));
           return;
         }
-        const entity = resource.instantiateRenderEntity({
-          castShadows: true,
-          receiveShadows: true,
-        });
-        resolve(entity);
+        resolve(resource);
       });
       asset.once('error', (err) => {
         reject(new Error(String(err || `Failed to load ${url}`)));
@@ -959,17 +1023,19 @@ export class PlayCanvasCarFleet {
         const cars = Array.isArray(json?.cars) ? json.cars : [];
         this.manifestCharacter = json?.character || null;
         this.manifestTashkent = json?.landmarkTashkent || null;
+        this.manifestRegiston = json?.landmarkRegiston || null;
         return {
-          version: json?.version ?? 2,
+          version: json?.version ?? 3,
           cars,
           character: this.manifestCharacter,
           landmarkTashkent: this.manifestTashkent,
+          landmarkRegiston: this.manifestRegiston,
         };
       }
     } catch {
-      // Ignore missing manifest
+      // Ignore
     }
-    return { cars: [], character: null, landmarkTashkent: null };
+    return { cars: [], character: null, landmarkTashkent: null, landmarkRegiston: null };
   }
 
   public async loadAllFromManifest(
@@ -977,13 +1043,15 @@ export class PlayCanvasCarFleet {
     onProgress?: (label: string, pct: number) => void
   ): Promise<PlayCanvasCar[]> {
     const manifestCars = manifest.cars || [];
-    const total = manifestCars.length + 1;
+    const total = Math.max(1, manifestCars.length);
 
     for (let i = 0; i < manifestCars.length; i++) {
       const item = manifestCars[i];
-      onProgress?.(`Loading ${item.name}…`, 56 + Math.round(((i + 0.35) / total) * 36));
+      onProgress?.(`Loading ${item.name}…`, 56 + Math.round(((i + 0.35) / total) * 34));
       try {
-        const raw = await this.loadGlbUrl(item.url, item.fileName);
+        const container = await this.loadGlbContainer(item.url, item.fileName);
+        this.loadedContainers.set(item.id, { resource: container, name: item.name });
+        const raw = container.instantiateRenderEntity({ castShadows: true, receiveShadows: true });
         const norm = this.normalizeGlbEntity(raw, item.name);
         this.registerCarEntity({
           id: item.id,
@@ -993,24 +1061,13 @@ export class PlayCanvasCarFleet {
           wheels: norm.wheels,
           width: norm.width,
           length: norm.length,
+          detectedPlate: norm.detectedPlate,
         });
       } catch (err) {
         console.warn(`[PlayCanvasCarFleet] Could not load ${item.fileName}:`, err);
       }
-      onProgress?.(`Loaded ${item.name}`, 56 + Math.round(((i + 1) / total) * 36));
+      onProgress?.(`Loaded ${item.name}`, 56 + Math.round(((i + 1) / total) * 34));
     }
-
-    // Built-in Campus GT starter coupe
-    const starter = buildStarterGtEntity();
-    this.registerCarEntity({
-      id: 'campus_gt_coupe',
-      name: 'Campus GT',
-      source: 'builtin',
-      modelWrapper: starter.model,
-      wheels: starter.wheels,
-      width: 1.98,
-      length: 4.45,
-    });
 
     if (this.cars.length > 0 && !this.activeCarId) {
       this.activeCarId = this.cars[0].id;
@@ -1019,7 +1076,66 @@ export class PlayCanvasCarFleet {
     return this.cars;
   }
 
-  public async importLocalGlbFile(file: File): Promise<PlayCanvasCar> {
+  /**
+   * Spawns live AI traffic cars on the city roads using the user's OWN .glb car models
+   * (Cobalt, Damas, and any future .glb cars — complete with spinning wheels, UZ plates & seated human drivers!).
+   */
+  public spawnUserCarsAsRoadTraffic(world: OpenWorldHandle, isMobile: boolean): void {
+    const entries = Array.from(this.loadedContainers.values());
+    if (entries.length === 0) return;
+
+    const totalTraffic = isMobile ? Math.min(4, entries.length * 2) : Math.min(6, entries.length * 3);
+    for (let i = 0; i < totalTraffic; i++) {
+      const src = entries[i % entries.length];
+      try {
+        const raw = src.resource.instantiateRenderEntity({ castShadows: !isMobile, receiveShadows: true });
+        const norm = this.normalizeGlbEntity(raw, src.name);
+
+        const holder = new pc.Entity(`TrafficUserCar_${src.name}_${i}`);
+        holder.addChild(norm.wrapper);
+
+        // Seat a real human driver inside the cabin!
+        const driver = createSeatedDriverEntity(i, norm.length, src.name);
+        norm.wrapper.addChild(driver);
+
+        // Give each AI road car its own crisp auto-aligned UZ license plate
+        const plateInfo = TRAFFIC_PLATES[i % TRAFFIC_PLATES.length];
+        new CarLicensePlateRig(this.app.graphicsDevice, norm.wrapper, {
+          enabled: true,
+          region: plateInfo.region,
+          text: plateInfo.text,
+          style: i % 3 === 2 ? 'taxi' : 'white',
+          ...norm.detectedPlate,
+        });
+
+        const sp = new pc.Entity('TrafficShadow');
+        sp.setLocalPosition(0, 0.03, 0);
+        sp.setLocalScale(norm.width * 1.3, 1, norm.length * 1.15);
+        sp.addComponent('render', {
+          type: 'plane',
+          material: this.shadowMat,
+          castShadows: false,
+          receiveShadows: false,
+        });
+        holder.addChild(sp);
+
+        const routeIndex = i % 3;
+        const phase = (i * 0.27 + 0.12) % 1;
+        const speed = 9.5 + (i % 3) * 1.8;
+        world.registerTrafficCar(
+          holder,
+          norm.wheels.map((w) => ({ spinPivot: w.spinPivot, radius: w.radius })),
+          routeIndex,
+          phase,
+          speed
+        );
+      } catch (err) {
+        console.warn('[PlayCanvasCarFleet] Could not spawn road traffic clone:', err);
+      }
+    }
+  }
+
+  public async importLocalGlbFile(file: File, world?: OpenWorldHandle): Promise<PlayCanvasCar> {
     const blobUrl = URL.createObjectURL(file);
     try {
       this.localCounter += 1;
@@ -1035,17 +1151,43 @@ export class PlayCanvasCarFleet {
             .join(' ')
         : `Custom Car ${this.localCounter}`;
 
-      const raw = await this.loadGlbUrl(blobUrl, file.name);
+      const container = await this.loadGlbContainer(blobUrl, file.name);
+      const id = `local_${Date.now()}_${this.localCounter}`;
+      this.loadedContainers.set(id, { resource: container, name: displayName });
+
+      const raw = container.instantiateRenderEntity({ castShadows: true, receiveShadows: true });
       const norm = this.normalizeGlbEntity(raw, displayName);
-      return this.registerCarEntity({
-        id: `local_${Date.now()}_${this.localCounter}`,
+      const car = this.registerCarEntity({
+        id,
         name: displayName,
         source: 'local',
         modelWrapper: norm.wrapper,
         wheels: norm.wheels,
         width: norm.width,
         length: norm.length,
+        detectedPlate: norm.detectedPlate,
       });
+
+      if (world) {
+        try {
+          const tRaw = container.instantiateRenderEntity({ castShadows: false, receiveShadows: true });
+          const tNorm = this.normalizeGlbEntity(tRaw, displayName);
+          const holder = new pc.Entity(`TrafficLocalCar_${displayName}`);
+          holder.addChild(tNorm.wrapper);
+          tNorm.wrapper.addChild(createSeatedDriverEntity(this.localCounter, tNorm.length, displayName));
+          world.registerTrafficCar(
+            holder,
+            tNorm.wheels.map((w) => ({ spinPivot: w.spinPivot, radius: w.radius })),
+            1,
+            Math.random(),
+            10.5
+          );
+        } catch {
+          // Ignore traffic clone errors
+        }
+      }
+
+      return car;
     } finally {
       setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     }

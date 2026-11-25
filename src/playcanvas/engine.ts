@@ -3,6 +3,7 @@ import { CarAudioEngine } from './audio';
 import { PlayCanvasCar, PlayCanvasCarFleet, CarSummary } from './carFleet';
 import { PlayableCharacter } from './character';
 import { LicensePlateConfig } from './licensePlate';
+import { NpcCrowdManager } from './npcs';
 import { buildPlayCanvasOpenWorld, OpenWorldHandle, TimeOfDay } from './world';
 
 export type CameraMode = 'chase' | 'hood' | 'orbit';
@@ -16,8 +17,8 @@ export interface ControlState {
   drift: boolean;
   nitro: boolean;
   sprint: boolean;
-  joyX: number; // -1..1 (analog thumbstick on foot / optional steer)
-  joyY: number; // -1..1 (+1 = forward, -1 = backward)
+  joyX: number; // -1..1
+  joyY: number; // -1..1
 }
 
 export interface HudTelemetry {
@@ -26,8 +27,7 @@ export interface HudTelemetry {
   gear: string;
   rpmNorm: number;
   nitroPct: number;
-  checkpointsCollected: number;
-  checkpointsTotal: number;
+  nitroActive: boolean;
   activeCarId: string;
   activeCarName: string;
   nearbyCarId: string | null;
@@ -35,6 +35,7 @@ export interface HudTelemetry {
   characterLabel: string;
   isCustomCharacter: boolean;
   isCustomTashkent: boolean;
+  isCustomRegiston: boolean;
   cameraMode: CameraMode;
   timeOfDay: TimeOfDay;
   muted: boolean;
@@ -63,6 +64,7 @@ export class PlayCanvasCarGame {
   public readonly world: OpenWorldHandle;
   public readonly fleet: PlayCanvasCarFleet;
   public readonly character: PlayableCharacter;
+  public readonly npcs: NpcCrowdManager;
 
   private readonly cameraEntity: pc.Entity;
   private readonly callbacks: EngineCallbacks;
@@ -92,20 +94,25 @@ export class PlayCanvasCarGame {
   private bodyPitch = 0;
   private wheelSpinDeg = 0;
   private nitroFuel = 1.0;
+  private nitroActiveNow = false;
+  private fullGasHoldSec = 0;
   private grounded = true;
   private elapsedSec = 0;
-  private checkpointsCollected = 0;
 
-  // On-foot camera & movement state
+  // On-foot camera & combat state (allows looking straight UP at Tashkent TV Tower & sky!)
   private footCamYawDeg = 0;
-  private footCamPitchDeg = 16;
+  private footCamPitchDeg = 12; // Negative = look UP at sky/tower, Positive = look down
   private nearbyCar: PlayCanvasCar | null = null;
+  private punchCooldown = 0;
+  private camShakeTimer = 0;
 
-  // Smooth camera state
+  // Smooth camera state (allows sky tilt in BOTH Chase & Orbit modes!)
   private camPos = new pc.Vec3(0, 4.2, 68);
   private camTarget = new pc.Vec3(0, 1.4, 58);
+  private chasePitchDeg = 0;    // Negative = look UP at sky/tower in Chase cam!
+  private chaseYawOffsetDeg = 0;
   private orbitYawDeg = 22;
-  private orbitPitchDeg = 18;
+  private orbitPitchDeg = 16;   // Negative = look UP at sky/tower in Orbit cam!
   private orbitDist = 8.4;
   private isDraggingCamera = false;
   private lastDragX = 0;
@@ -135,7 +142,6 @@ export class PlayCanvasCarGame {
       false
     );
 
-    // Lean PlayCanvas Application with HDR ACES tone mapping & mobile-safe pixel ratio
     this.app = new pc.Application(canvas, {
       graphicsDeviceOptions: {
         antialias: !this.isMobile,
@@ -154,7 +160,7 @@ export class PlayCanvasCarGame {
       clearColor: new pc.Color(0.52, 0.76, 0.96),
       fov: 54,
       nearClip: 0.22,
-      farClip: 620,
+      farClip: 980,
       toneMapping: pc.TONEMAP_ACES,
     });
     this.cameraEntity.setLocalPosition(this.camPos);
@@ -164,7 +170,8 @@ export class PlayCanvasCarGame {
     this.world.setTimeOfDay('day', this.cameraEntity.camera);
     this.fleet = new PlayCanvasCarFleet(this.app);
     this.character = new PlayableCharacter(this.app);
-    this.character.setVisible(false); // Starts inside first car; press Exit/F to walk!
+    this.character.setVisible(false);
+    this.npcs = new NpcCrowdManager(this.app, this.isMobile);
 
     this.bindCameraOrbitGestures();
     this.bindKeyboard();
@@ -178,17 +185,19 @@ export class PlayCanvasCarGame {
     this.callbacks.onLoadProgress?.('Starting PlayCanvas HDR Engine…', 10);
     const manifest = await this.fleet.fetchManifest();
 
-    // Load real campus GLBs + optional tashkent.glb
-    await this.world.loadCampusAssets(manifest.landmarkTashkent?.url ?? null, (label, pct) => {
-      this.callbacks.onLoadProgress?.(label, pct);
-    });
+    await this.world.loadCampusAssets(
+      manifest.landmarkTashkent?.url ?? null,
+      manifest.landmarkRegiston?.url ?? null,
+      (label, pct) => {
+        this.callbacks.onLoadProgress?.(label, pct);
+      }
+    );
 
-    // Load cars from manifest (Cobalt, Damas, etc.) + Campus GT
     await this.fleet.loadAllFromManifest(manifest, (label, pct) => {
       this.callbacks.onLoadProgress?.(label, pct);
     });
+    this.fleet.spawnUserCarsAsRoadTraffic(this.world, this.isMobile);
 
-    // Auto-load character.glb if present in /models/
     if (manifest.character?.url) {
       this.callbacks.onLoadProgress?.('Loading character.glb…', 95);
       await this.character.loadFromUrl(manifest.character.url, manifest.character.fileName);
@@ -225,12 +234,18 @@ export class PlayCanvasCarGame {
       const dy = e.clientY - this.lastDragY;
       this.lastDragX = e.clientX;
       this.lastDragY = e.clientY;
+
       if (this.playerMode === 'foot') {
         this.footCamYawDeg -= dx * 0.34;
-        this.footCamPitchDeg = Math.max(4, Math.min(54, this.footCamPitchDeg + dy * 0.22));
-      } else {
+        // Full vertical sky look range (-52° straight UP at Tashkent Tower spire to +54° down!)
+        this.footCamPitchDeg = Math.max(-52, Math.min(54, this.footCamPitchDeg + dy * 0.28));
+      } else if (this.cameraMode === 'orbit') {
         this.orbitYawDeg -= dx * 0.32;
-        this.orbitPitchDeg = Math.max(6, Math.min(58, this.orbitPitchDeg + dy * 0.24));
+        this.orbitPitchDeg = Math.max(-36, Math.min(58, this.orbitPitchDeg + dy * 0.26));
+      } else {
+        // Chase & Hood cam ALSO support looking UP at the sky & Tashkent TV Tower spire!
+        this.chaseYawOffsetDeg = Math.max(-145, Math.min(145, this.chaseYawOffsetDeg - dx * 0.28));
+        this.chasePitchDeg = Math.max(-44, Math.min(34, this.chasePitchDeg + dy * 0.26));
       }
     });
     window.addEventListener('pointerup', () => {
@@ -270,7 +285,16 @@ export class PlayCanvasCarGame {
           this.controls.right = down;
           break;
         case 'Space':
-          this.controls.drift = down;
+          if (this.playerMode === 'foot') {
+            if (down && !e.repeat) this.triggerPunch();
+          } else {
+            this.controls.drift = down;
+          }
+          break;
+        case 'KeyE':
+          if (down && !e.repeat && this.playerMode === 'foot') {
+            this.triggerPunch();
+          }
           break;
         case 'ShiftLeft':
         case 'ShiftRight':
@@ -309,6 +333,32 @@ export class PlayCanvasCarGame {
     this.audio.playHorn();
   }
 
+  /**
+   * GTA On-Foot Melee Punch! Hits nearby citizens with realistic impact + vocal grunt,
+   * and triggers them to fight back!
+   */
+  public triggerPunch(): void {
+    this.audio.unlock();
+    if (this.playerMode !== 'foot' || this.punchCooldown > 0) return;
+
+    this.punchCooldown = 0.36;
+    this.character.triggerPunch();
+    this.audio.playPunchSwing();
+
+    const res = this.npcs.handlePlayerPunch(this.character.x, this.character.z, this.character.yaw);
+    if (res.hit) {
+      // Turn player cleanly toward the struck citizen
+      const dx = res.npcX - this.character.x;
+      const dz = res.npcZ - this.character.z;
+      this.character.yaw = (Math.atan2(-dx, -dz) * 180) / Math.PI;
+      this.character.setPosition(this.character.x, this.character.y, this.character.z, this.character.yaw);
+
+      this.audio.playPunchHit();
+      this.audio.playHumanGrunt(res.voicePitch);
+      this.camShakeTimer = 0.14;
+    }
+  }
+
   public toggleMute(): boolean {
     this.audio.unlock();
     this.audio.setMuted(!this.audio.muted);
@@ -316,15 +366,12 @@ export class PlayCanvasCarGame {
     return this.audio.muted;
   }
 
-  /**
-   * GTA-style seamless Enter / Exit Car!
-   */
   public toggleEnterExitCar(): void {
     this.audio.unlock();
     if (this.playerMode === 'car') {
       const car = this.fleet.getActiveCar();
       if (!car) return;
-      // Exit beside driver's left door
+      for (const f of car.nitroFlames) f.enabled = false;
       const yawRad = (car.yaw * Math.PI) / 180;
       const leftX = -Math.cos(yawRad);
       const leftZ = Math.sin(yawRad);
@@ -336,13 +383,14 @@ export class PlayCanvasCarGame {
       this.velZ = 0;
       this.velY = 0;
       this.steerAngle = 0;
+      this.fullGasHoldSec = 0;
+      this.nitroActiveNow = false;
       this.playerMode = 'foot';
       this.footCamYawDeg = car.yaw;
-      this.footCamPitchDeg = 16;
+      this.footCamPitchDeg = 12;
 
       this.character.setPosition(exitX, exitY, exitZ, car.yaw);
       this.character.setVisible(true);
-      this.audio.update(0.05, 0, 0, false);
       this.emitTelemetryNow();
     } else {
       const target = this.fleet.findNearestCar(this.character.x, this.character.z, 5.2) || this.fleet.getActiveCar();
@@ -353,6 +401,8 @@ export class PlayCanvasCarGame {
       this.velX = 0;
       this.velZ = 0;
       this.velY = 0;
+      this.chasePitchDeg = 0;
+      this.chaseYawOffsetDeg = 0;
       this.snapCameraToCar(target);
       this.audio.playHorn();
       this.emitTelemetryNow();
@@ -372,7 +422,10 @@ export class PlayCanvasCarGame {
     const car = this.fleet.getActiveCar();
     if (car && this.cameraMode === 'orbit') {
       this.orbitYawDeg = car.yaw + 28;
-      this.orbitPitchDeg = 18;
+      this.orbitPitchDeg = 16;
+    } else {
+      this.chasePitchDeg = 0;
+      this.chaseYawOffsetDeg = 0;
     }
     this.emitTelemetryNow();
     return this.cameraMode;
@@ -388,6 +441,10 @@ export class PlayCanvasCarGame {
   }
 
   public selectCar(carId: string): void {
+    const prev = this.fleet.getActiveCar();
+    if (prev) {
+      for (const f of prev.nitroFlames) f.enabled = false;
+    }
     const car = this.fleet.getCarById(carId);
     if (!car) return;
     this.fleet.activeCarId = car.id;
@@ -399,6 +456,9 @@ export class PlayCanvasCarGame {
     this.bodyRoll = 0;
     this.bodyPitch = 0;
     this.steerAngle = 0;
+    this.fullGasHoldSec = 0;
+    this.chasePitchDeg = 0;
+    this.chaseYawOffsetDeg = 0;
     this.snapCameraToCar(car);
     this.audio.playHorn();
     this.emitTelemetryNow();
@@ -422,7 +482,7 @@ export class PlayCanvasCarGame {
   }
 
   public async importLocalGlb(file: File): Promise<PlayCanvasCar> {
-    const car = await this.fleet.importLocalGlbFile(file);
+    const car = await this.fleet.importLocalGlbFile(file, this.world);
     this.selectCar(car.id);
     return car;
   }
@@ -449,11 +509,18 @@ export class PlayCanvasCarGame {
     return ok;
   }
 
+  public async importRegistonGlb(file: File): Promise<boolean> {
+    const ok = await this.world.loadRegistonGlbFile(file);
+    this.emitTelemetryNow();
+    return ok;
+  }
+
   public resetActiveCar(): void {
     if (this.playerMode === 'foot') {
       const y = this.world.getTerrainHeight(-3.5, 58);
       this.character.setPosition(-3.5, y, 58, 0);
       this.footCamYawDeg = 0;
+      this.footCamPitchDeg = 12;
       this.emitTelemetryNow();
       return;
     }
@@ -469,6 +536,9 @@ export class PlayCanvasCarGame {
     this.bodyRoll = 0;
     this.bodyPitch = 0;
     this.nitroFuel = 1.0;
+    this.fullGasHoldSec = 0;
+    this.chasePitchDeg = 0;
+    this.chaseYawOffsetDeg = 0;
     car.root.setLocalPosition(car.x, car.y, car.z);
     car.root.setLocalEulerAngles(0, car.yaw, 0);
     car.tiltPivot.setLocalEulerAngles(0, 0, 0);
@@ -522,8 +592,10 @@ export class PlayCanvasCarGame {
   private handleUpdate = (rawDt: number): void => {
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
     this.elapsedSec += dt;
+    if (this.punchCooldown > 0) this.punchCooldown = Math.max(0, this.punchCooldown - dt);
+    if (this.camShakeTimer > 0) this.camShakeTimer = Math.max(0, this.camShakeTimer - dt);
 
-    let playerPos = new pc.Vec3(0, 0, 0);
+    const playerPos = new pc.Vec3(0, 0, 0);
 
     if (this.playerMode === 'foot') {
       this.stepOnFootPhysics(dt);
@@ -539,20 +611,25 @@ export class PlayCanvasCarGame {
       playerPos.set(car.x, car.y, car.z);
     }
 
-    const newlyCollected = this.world.update(dt, this.elapsedSec, playerPos);
-    if (newlyCollected > 0) {
-      this.checkpointsCollected += newlyCollected;
-      this.nitroFuel = Math.min(1.0, this.nitroFuel + 0.35);
-      this.audio.playCheckpoint();
-      if (this.checkpointsCollected >= this.world.checkpoints.length) {
-        setTimeout(() => {
-          this.world.resetCheckpoints();
-          this.checkpointsCollected = 0;
-          this.emitTelemetryNow();
-        }, 1800);
+    this.world.update(dt, this.elapsedSec, playerPos);
+
+    // Update living city population (walkers, building citizens, swimmers & fight-back combat!)
+    this.npcs.update(
+      dt,
+      this.elapsedSec,
+      playerPos.x,
+      playerPos.z,
+      this.playerMode === 'foot',
+      this.world.getTerrainHeight,
+      () => {
+        if (this.playerMode === 'foot') {
+          this.character.triggerHitRecoil();
+          this.audio.playPunchHit();
+          this.audio.playHumanGrunt(0.92);
+          this.camShakeTimer = 0.22;
+        }
       }
-      this.emitTelemetryNow();
-    }
+    );
 
     if (this.elapsedSec - this.lastTelemetryTime >= 0.05) {
       this.emitTelemetryNow();
@@ -560,7 +637,6 @@ export class PlayCanvasCarGame {
   };
 
   private stepOnFootPhysics(dt: number): void {
-    // Combine keyboard WASD + touch analog thumbstick relative to camera facing direction!
     const keyFwd = (this.controls.gas ? 1 : 0) - (this.controls.brake ? 1 : 0);
     const keyStrafe = (this.controls.right ? 1 : 0) - (this.controls.left ? 1 : 0);
 
@@ -589,9 +665,8 @@ export class PlayCanvasCarGame {
       const dirX = moveX / moveLen;
       const dirZ = moveZ / moveLen;
 
-      // Smoothly turn character toward movement direction
       const targetYawDeg = (Math.atan2(-dirX, -dirZ) * 180) / Math.PI;
-      let diff = ((targetYawDeg - this.character.yaw + 540) % 360) - 180;
+      const diff = ((targetYawDeg - this.character.yaw + 540) % 360) - 180;
       this.character.yaw += diff * Math.min(1, dt * 12);
 
       const nextX = this.character.x + dirX * moveSpeed * dt;
@@ -601,14 +676,24 @@ export class PlayCanvasCarGame {
       const groundY = this.world.getTerrainHeight(col.x, col.z);
       this.character.setPosition(col.x, groundY, col.z, this.character.yaw);
 
-      // Gentle camera follow alignment when walking forward with joystick
       if (!this.isDraggingCamera && Math.abs(inRight) > 0.25) {
         this.footCamYawDeg -= inRight * 42 * dt;
       }
     }
 
+    // Character's head physically tilts UP into the sky when looking at Tashkent TV Tower!
+    this.character.setLookPitch(-this.footCamPitchDeg);
     this.character.updateAnimation(dt, moveSpeed, running);
-    this.audio.update(0.04, 0, 0, false);
+
+    this.audio.updateWorld({
+      inCar: false,
+      rpmNorm: 0,
+      throttle: 0,
+      driftAmount: 0,
+      nitroActive: false,
+      waterProximity: this.world.getWaterProximity(this.character.x, this.character.z),
+      trafficProximity: this.world.getNearestTrafficProximity(this.character.x, this.character.z),
+    });
   }
 
   private updateFootCamera(dt: number): void {
@@ -617,24 +702,36 @@ export class PlayCanvasCarGame {
     const dist = 4.6;
     const horiz = Math.cos(pitchRad) * dist;
 
-    // Slight GTA over-the-shoulder framing
+    // When pitching negative (looking UP at sky / Tashkent TV Tower), keep camera cleanly above ground
+    // and elevate the look target high into the sky!
+    const rawCamY = this.character.y + 1.55 + Math.sin(pitchRad) * dist;
+    const minCamY = this.character.y + 0.52;
+    const skyLift = this.footCamPitchDeg < 0 ? Math.tan((-this.footCamPitchDeg * Math.PI) / 180) * 5.2 : 0;
+
     const desiredPos = new pc.Vec3(
       this.character.x + Math.sin(yawRad) * horiz,
-      this.character.y + 1.55 + Math.sin(pitchRad) * dist,
+      Math.max(minCamY, rawCamY),
       this.character.z + Math.cos(yawRad) * horiz
     );
     const desiredTarget = new pc.Vec3(
-      this.character.x - Math.sin(yawRad) * 1.4,
-      this.character.y + 1.38,
-      this.character.z - Math.cos(yawRad) * 1.4
+      this.character.x - Math.sin(yawRad) * 3.8,
+      this.character.y + 1.48 + skyLift,
+      this.character.z - Math.cos(yawRad) * 3.8
     );
 
-    const alpha = 1 - Math.exp(-10 * dt);
+    const alpha = 1 - Math.exp(-11 * dt);
     this.camPos.lerp(this.camPos, desiredPos, alpha);
     this.camTarget.lerp(this.camTarget, desiredTarget, alpha);
 
+    // Subtle camera punch impact shake
+    if (this.camShakeTimer > 0) {
+      const s = this.camShakeTimer * 0.65;
+      this.camPos.x += (Math.random() - 0.5) * s;
+      this.camPos.y += (Math.random() - 0.5) * s;
+    }
+
     if (this.cameraEntity.camera) {
-      this.cameraEntity.camera.fov += (54 - this.cameraEntity.camera.fov) * Math.min(1, dt * 6);
+      this.cameraEntity.camera.fov += (55 - this.cameraEntity.camera.fov) * Math.min(1, dt * 6);
     }
     this.cameraEntity.setLocalPosition(this.camPos);
     this.cameraEntity.lookAt(this.camTarget);
@@ -653,17 +750,26 @@ export class PlayCanvasCarGame {
     const throttle = this.controls.gas ? 1 : 0;
     const brakeInput = this.controls.brake ? 1 : 0;
     const driftHeld = this.controls.drift;
-    const nitroActive = this.controls.nitro && this.nitroFuel > 0.02 && throttle > 0;
+
+    // Auto-Nitro kicks in when GAS is held at full throttle! (Plus manual NOS button anytime!)
+    if (throttle > 0 && brakeInput === 0) {
+      this.fullGasHoldSec += dt;
+    } else {
+      this.fullGasHoldSec = 0;
+    }
+    const autoFullThrottleNitro = this.fullGasHoldSec > 1.5 && forwardSpeed > 15.5;
+    const nitroActive = (this.controls.nitro || autoFullThrottleNitro) && this.nitroFuel > 0.02 && throttle > 0;
+    this.nitroActiveNow = nitroActive;
 
     if (nitroActive) {
-      this.nitroFuel = Math.max(0, this.nitroFuel - dt * 0.28);
+      this.nitroFuel = Math.max(0, this.nitroFuel - dt * (this.controls.nitro ? 0.25 : 0.14));
     } else {
-      this.nitroFuel = Math.min(1, this.nitroFuel + dt * 0.11);
+      this.nitroFuel = Math.min(1, this.nitroFuel + dt * 0.14);
     }
 
-    const maxSpeed = nitroActive ? 48.0 : 35.0;
+    const maxSpeed = nitroActive ? 49.0 : 35.0;
     const maxReverse = -14.0;
-    const accelRate = nitroActive ? 28.0 : 18.5;
+    const accelRate = nitroActive ? 29.0 : 18.5;
     const prevForwardSpeed = forwardSpeed;
 
     if (this.grounded) {
@@ -757,15 +863,24 @@ export class PlayCanvasCarGame {
     car.root.setLocalEulerAngles(0, car.yaw, 0);
     car.tiltPivot.setLocalEulerAngles(slopePitchDeg + this.bodyPitch, 0, this.bodyRoll);
 
-    // REAL DECOUPLED WHEEL RIGGING: SteerPivot turns front wheels around Y, SpinPivot rolls all 4 wheels around X!
+    // Animate Nitro exhaust flames flickering cleanly behind the car!
+    for (let i = 0; i < car.nitroFlames.length; i++) {
+      const f = car.nitroFlames[i];
+      f.enabled = nitroActive;
+      if (nitroActive) {
+        const flicker = 0.85 + Math.sin(this.elapsedSec * 48 + i * 2.1) * 0.32 + Math.random() * 0.22;
+        f.setLocalScale(0.95 + Math.random() * 0.2, 0.95 + Math.random() * 0.2, flicker);
+      }
+    }
+
+    // Decoupled Wheel Steering + Rolling Spin (non-inverted!)
     const flipSign = car.flip180 ? -1 : 1;
     const avgRadius = car.wheels[0]?.radius || 0.35;
     this.wheelSpinDeg += ((forwardSpeed * dt) / Math.max(0.22, avgRadius)) * (180 / Math.PI);
-    const steerDeg = this.steerAngle * 30 * flipSign;
+    const steerDeg = this.steerAngle * 30;
 
     for (let i = 0; i < car.wheels.length; i++) {
       const w = car.wheels[i];
-      // When flipped 180°, rear wheels become front wheels visually!
       const actsAsFront = car.flip180 ? !w.isFront : w.isFront;
       w.steerPivot.setLocalEulerAngles(0, actsAsFront ? steerDeg : 0, 0);
       w.spinPivot.setLocalEulerAngles(-this.wheelSpinDeg * flipSign, 0, 0);
@@ -777,7 +892,16 @@ export class PlayCanvasCarGame {
       this.grounded && Math.abs(lateralSpeed) > 3.2
         ? Math.min(1, (Math.abs(lateralSpeed) - 3.2) / 8.0)
         : 0;
-    this.audio.update(rpmNorm, throttle, driftSound, nitroActive);
+
+    this.audio.updateWorld({
+      inCar: true,
+      rpmNorm,
+      throttle,
+      driftAmount: driftSound,
+      nitroActive,
+      waterProximity: this.world.getWaterProximity(car.x, car.z),
+      trafficProximity: this.world.getNearestTrafficProximity(car.x, car.z),
+    });
   }
 
   private updateCarCamera(car: PlayCanvasCar, dt: number): void {
@@ -789,39 +913,62 @@ export class PlayCanvasCarGame {
     const targetFov =
       this.cameraMode === 'hood'
         ? 62 + Math.min(14, speed * 0.35)
-        : 52 + Math.min(14, speed * 0.34) + (this.controls.nitro && this.nitroFuel > 0.05 ? 4 : 0);
+        : 52 + Math.min(14, speed * 0.34) + (this.nitroActiveNow ? 5.5 : 0);
     if (this.cameraEntity.camera) {
       this.cameraEntity.camera.fov += (targetFov - this.cameraEntity.camera.fov) * Math.min(1, dt * 6);
+    }
+
+    // Gently recentre horizontal chase drag only when driving fast and not dragging
+    if (!this.isDraggingCamera && speed > 6 && this.cameraMode === 'chase') {
+      this.chaseYawOffsetDeg *= Math.exp(-2.2 * dt);
     }
 
     const desiredPos = new pc.Vec3();
     const desiredTarget = new pc.Vec3();
 
     if (this.cameraMode === 'hood') {
+      const lookUp = this.chasePitchDeg < 0 ? Math.tan((-this.chasePitchDeg * Math.PI) / 180) * 14 : -this.chasePitchDeg * 0.08;
       desiredPos.set(car.x + fwdX * 0.45, car.y + 1.52, car.z + fwdZ * 0.45);
-      desiredTarget.set(car.x + fwdX * 14, car.y + 1.25, car.z + fwdZ * 14);
+      desiredTarget.set(car.x + fwdX * 14, car.y + 1.25 + lookUp, car.z + fwdZ * 14);
       this.camPos.copy(desiredPos);
       this.camTarget.copy(desiredTarget);
     } else if (this.cameraMode === 'orbit') {
       const oYaw = (this.orbitYawDeg * Math.PI) / 180;
       const oPitch = (this.orbitPitchDeg * Math.PI) / 180;
       const horiz = Math.cos(oPitch) * this.orbitDist;
+      const rawY = car.y + 1.25 + Math.sin(oPitch) * this.orbitDist;
+      const skyLift = this.orbitPitchDeg < 0 ? Math.tan((-this.orbitPitchDeg * Math.PI) / 180) * 6.5 : 0;
       desiredPos.set(
         car.x + Math.sin(oYaw) * horiz,
-        car.y + 1.1 + Math.sin(oPitch) * this.orbitDist,
+        Math.max(car.y + 0.65, rawY),
         car.z + Math.cos(oYaw) * horiz
       );
-      desiredTarget.set(car.x, car.y + 1.05, car.z);
+      desiredTarget.set(car.x, car.y + 1.15 + skyLift, car.z);
       const alpha = 1 - Math.exp(-12 * dt);
       this.camPos.lerp(this.camPos, desiredPos, alpha);
       this.camTarget.lerp(this.camTarget, desiredTarget, alpha);
     } else {
-      const backDist = 7.2 + Math.min(2.2, speed * 0.055);
-      const height = 2.7 + Math.min(0.6, speed * 0.015);
-      desiredPos.set(car.x - fwdX * backDist, car.y + height, car.z - fwdZ * backDist);
-      desiredTarget.set(car.x + fwdX * 3.0, car.y + 1.1, car.z + fwdZ * 3.0);
-      const posAlpha = 1 - Math.exp(-7.8 * dt);
-      const tgtAlpha = 1 - Math.exp(-12.5 * dt);
+      // Chase Camera with Full Sky-Pitch Look-Up (can admire top of 86m Tashkent TV Tower!)
+      const totalYawRad = ((car.yaw + this.chaseYawOffsetDeg) * Math.PI) / 180;
+      const cFwdX = -Math.sin(totalYawRad);
+      const cFwdZ = -Math.cos(totalYawRad);
+      const backDist = 7.4 + Math.min(2.2, speed * 0.055);
+      const pitchRad = (this.chasePitchDeg * Math.PI) / 180;
+      const rawCamY = car.y + 2.7 + Math.min(0.6, speed * 0.015) + Math.sin(pitchRad) * 4.2;
+      const skyLift = this.chasePitchDeg < 0 ? Math.tan((-this.chasePitchDeg * Math.PI) / 180) * 9.5 : 0;
+
+      desiredPos.set(
+        car.x - cFwdX * backDist,
+        Math.max(car.y + 0.75, rawCamY),
+        car.z - cFwdZ * backDist
+      );
+      desiredTarget.set(
+        car.x + cFwdX * 3.8,
+        car.y + 1.2 + skyLift,
+        car.z + cFwdZ * 3.8
+      );
+      const posAlpha = 1 - Math.exp(-8.5 * dt);
+      const tgtAlpha = 1 - Math.exp(-13.0 * dt);
       this.camPos.lerp(this.camPos, desiredPos, posAlpha);
       this.camTarget.lerp(this.camTarget, desiredTarget, tgtAlpha);
     }
@@ -872,8 +1019,7 @@ export class PlayCanvasCarGame {
       gear,
       rpmNorm,
       nitroPct: Math.round(this.nitroFuel * 100),
-      checkpointsCollected: this.checkpointsCollected,
-      checkpointsTotal: this.world.checkpoints.length,
+      nitroActive: this.nitroActiveNow,
       activeCarId: car?.id ?? '',
       activeCarName: car?.name ?? 'Loading…',
       nearbyCarId: this.nearbyCar?.id ?? null,
@@ -881,6 +1027,7 @@ export class PlayCanvasCarGame {
       characterLabel: this.character.label,
       isCustomCharacter: this.character.isCustomGlb,
       isCustomTashkent: this.world.isCustomTashkentLoaded(),
+      isCustomRegiston: this.world.isCustomRegistonLoaded(),
       cameraMode: this.cameraMode,
       timeOfDay: this.timeOfDay,
       muted: this.audio.muted,

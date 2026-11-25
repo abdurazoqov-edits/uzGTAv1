@@ -15,7 +15,6 @@ const reloadBtn = document.getElementById('btn-reload-gl')!;
 
 const modeDotEl = document.getElementById('hud-mode-dot')!;
 const carNameEl = document.getElementById('hud-car-name')!;
-const checkpointsEl = document.getElementById('hud-checkpoints')!;
 const plateShortEl = document.getElementById('hud-plate-short')!;
 const speedValEl = document.getElementById('speed-val')!;
 const gearEl = document.getElementById('speed-gear')!;
@@ -57,8 +56,11 @@ const btnImportChar = document.getElementById('btn-import-char')!;
 const fileInputChar = document.getElementById('file-input-char') as HTMLInputElement;
 const btnImportTashkent = document.getElementById('btn-import-tashkent')!;
 const fileInputTashkent = document.getElementById('file-input-tashkent') as HTMLInputElement;
+const btnImportRegiston = document.getElementById('btn-import-registon')!;
+const fileInputRegiston = document.getElementById('file-input-registon') as HTMLInputElement;
 const charStatusEl = document.getElementById('char-status')!;
 const tashkentStatusEl = document.getElementById('tashkent-status')!;
+const registonStatusEl = document.getElementById('registon-status')!;
 
 // License Plate Controls
 const platePreviewEl = document.getElementById('plate-preview')!;
@@ -137,8 +139,7 @@ function renderGarageList(t: HudTelemetry, game: PlayCanvasCarGame): void {
     const row = document.createElement('div');
     row.className = `car-row${isActive ? ' active' : ''}`;
 
-    const sourceLabel =
-      car.source === 'models' ? 'models/*.glb' : car.source === 'local' ? 'Local .glb' : 'Built-in 3D';
+    const sourceLabel = car.source === 'models' ? 'models/*.glb' : 'Local .glb';
     const wheelTag = car.wheelCount > 0 ? `${car.wheelCount} wheels` : 'rigid';
 
     row.innerHTML = `
@@ -172,7 +173,6 @@ function syncHud(t: HudTelemetry, game: PlayCanvasCarGame): void {
   const isFoot = t.playerMode === 'foot';
   modeDotEl.classList.toggle('foot', isFoot);
   carNameEl.textContent = isFoot ? t.characterLabel : t.activeCarName;
-  checkpointsEl.textContent = `${t.checkpointsCollected}/${t.checkpointsTotal}`;
   speedValEl.textContent = String(t.speedKmh);
   gearEl.textContent = t.gear;
   rpmFillEl.style.width = `${Math.round(t.rpmNorm * 100)}%`;
@@ -206,10 +206,13 @@ function syncHud(t: HudTelemetry, game: PlayCanvasCarGame): void {
   // World & Character status
   charStatusEl.textContent = t.isCustomCharacter
     ? `Loaded: ${t.characterLabel}`
-    : 'Articulated Character (drop models/character.glb or Load below)';
+    : 'Realistic Human (drop models/character.glb or Load below)';
   tashkentStatusEl.textContent = t.isCustomTashkent
     ? 'Loaded: tashkent.glb · Central Plaza (0, 29)'
     : 'Architectural Tower · Central Plaza (drop models/tashkent.glb or Load below)';
+  registonStatusEl.textContent = t.isCustomRegiston
+    ? 'Loaded: registon_opt.glb · Samarqand 2027'
+    : 'Samarqand 2027 Registon (drop models/registon_opt.glb or Load below)';
 
   // Sync license plate UI when active car changes
   const activeCar = t.cars.find((c) => c.id === t.activeCarId);
@@ -349,6 +352,20 @@ fileInputTashkent.addEventListener('change', async () => {
   }
 });
 
+btnImportRegiston.addEventListener('click', () => fileInputRegiston.click());
+fileInputRegiston.addEventListener('change', async () => {
+  const file = fileInputRegiston.files?.[0];
+  fileInputRegiston.value = '';
+  if (!file) return;
+  btnImportRegiston.textContent = 'Loading…';
+  try {
+    await game.importRegistonGlb(file);
+    garageBackdrop.classList.add('hidden');
+  } finally {
+    btnImportRegiston.textContent = '+ Load registon_opt.glb';
+  }
+});
+
 // Multi-Touch Hold Controls (Steering, Pedals, Drift, Nitro, Sprint)
 function bindHoldControl(elId: string, control: Exclude<keyof ControlState, 'joyX' | 'joyY'>): void {
   const el = document.getElementById(elId);
@@ -394,6 +411,12 @@ document.getElementById('touch-horn')?.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   e.stopPropagation();
   game.triggerHorn();
+});
+
+document.getElementById('touch-punch')?.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  game.triggerPunch();
 });
 
 // On-Foot Virtual Analog Thumbstick

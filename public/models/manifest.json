@@ -1,23 +1,26 @@
 {
-  "version": 1,
-  "generatedAt": "2026-11-23T11:02:05.336Z",
+  "version": 3,
+  "generatedAt": "2026-11-25T11:20:03.598Z",
   "count": 2,
   "cars": [
     {
       "id": "car_cobalt_opt_1",
       "fileName": "cobalt_opt.glb",
       "url": "./models/cobalt_opt.glb",
-      "name": "Cobalt",
       "sizeBytes": 1075040,
-      "source": "models"
+      "source": "models",
+      "name": "Cobalt"
     },
     {
       "id": "car_damas_opt_2",
       "fileName": "damas_opt.glb",
       "url": "./models/damas_opt.glb",
-      "name": "Damas",
       "sizeBytes": 591756,
-      "source": "models"
+      "source": "models",
+      "name": "Damas"
     }
-  ]
+  ],
+  "character": null,
+  "landmarkTashkent": null,
+  "landmarkRegiston": null
 }

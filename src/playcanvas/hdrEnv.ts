@@ -52,8 +52,8 @@ const ENV_PRESETS: Record<TimeOfDay, EnvPreset> = {
     fillColor: [0.58, 0.78, 1.0],
     fillIntensity: 0.55,
     fogColor: [0.76, 0.86, 0.96],
-    fogStart: 135,
-    fogEnd: 480,
+    fogStart: 220,
+    fogEnd: 820,
     clearColor: [0.52, 0.76, 0.96],
   },
   sunset: {
@@ -78,8 +78,8 @@ const ENV_PRESETS: Record<TimeOfDay, EnvPreset> = {
     fillColor: [0.55, 0.58, 0.92],
     fillIntensity: 0.48,
     fogColor: [0.92, 0.63, 0.45],
-    fogStart: 115,
-    fogEnd: 440,
+    fogStart: 195,
+    fogEnd: 760,
     clearColor: [0.88, 0.55, 0.38],
   },
   night: {
@@ -104,8 +104,8 @@ const ENV_PRESETS: Record<TimeOfDay, EnvPreset> = {
     fillColor: [0.96, 0.74, 0.45],
     fillIntensity: 0.32,
     fogColor: [0.06, 0.1, 0.19],
-    fogStart: 85,
-    fogEnd: 340,
+    fogStart: 150,
+    fogEnd: 640,
     clearColor: [0.05, 0.08, 0.16],
   },
 };

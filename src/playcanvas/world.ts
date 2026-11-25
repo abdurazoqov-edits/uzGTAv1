@@ -19,25 +19,27 @@ export interface StuntRamp {
   height: number;
 }
 
-export interface CheckpointRing {
-  id: string;
-  label: string;
-  x: number;
-  y: number;
-  z: number;
-  radius: number;
-  collected: boolean;
+export interface TrafficAgent {
   entity: pc.Entity;
-  ringMesh: pc.Entity;
-}
-
-interface WaymoAgent {
-  entity: pc.Entity;
+  wheels: Array<{ spinPivot: pc.Entity; radius: number }>;
   speed: number;
   phase: number;
   route: Array<{ x: number; z: number }>;
   segLengths: number[];
   totalLen: number;
+  spinDeg: number;
+  x: number;
+  z: number;
+}
+
+interface SwayItem {
+  node: pc.Entity;
+  baseX: number;
+  baseY: number;
+  baseZ: number;
+  phase: number;
+  ampDeg: number;
+  speed: number;
 }
 
 export interface OpenWorldHandle {
@@ -45,45 +47,59 @@ export interface OpenWorldHandle {
   hdrEnv: HdrEnvironmentController;
   colliders: WorldBoxCollider[];
   ramps: StuntRamp[];
-  checkpoints: CheckpointRing[];
   worldRadius: number;
   tashkentCenter: { x: number; z: number };
+  registonCenter: { x: number; z: number };
   getTerrainHeight: (x: number, z: number) => number;
+  getWaterProximity: (x: number, z: number) => number;
+  getNearestTrafficProximity: (x: number, z: number) => number;
   setTimeOfDay: (mode: TimeOfDay, camera?: pc.CameraComponent | null) => void;
-  update: (dt: number, elapsedSec: number, playerPos: pc.Vec3) => number;
-  resetCheckpoints: () => void;
+  update: (dt: number, elapsedSec: number, playerPos: pc.Vec3) => void;
   loadCampusAssets: (
     tashkentUrl?: string | null,
+    registonUrl?: string | null,
     onProgress?: (label: string, pct: number) => void
   ) => Promise<void>;
   loadTashkentGlbUrl: (url: string, name?: string) => Promise<boolean>;
   loadTashkentGlbFile: (file: File) => Promise<boolean>;
+  loadRegistonGlbUrl: (url: string, name?: string) => Promise<boolean>;
+  loadRegistonGlbFile: (file: File) => Promise<boolean>;
   isCustomTashkentLoaded: () => boolean;
+  isCustomRegistonLoaded: () => boolean;
+  registerTrafficCar: (
+    entity: pc.Entity,
+    wheels: Array<{ spinPivot: pc.Entity; radius: number }>,
+    routeIndex: number,
+    phase: number,
+    speed: number
+  ) => void;
 }
 
 // ============================================================================
-// Crisp Procedural PBR Surface Textures (Asphalt, Granite Pavers, Lawn Grass)
+// Crisp Procedural PBR Surface Textures (Asphalt, Plaza Pavers, Grass, Water)
 // ============================================================================
 function makeCanvasTexture(
   device: pc.GraphicsDevice,
-  size: number,
-  draw: (ctx: CanvasRenderingContext2D, s: number) => void
+  width: number,
+  height: number,
+  draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void,
+  repeat = true
 ): pc.Texture {
   const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d');
-  if (ctx) draw(ctx, size);
+  if (ctx) draw(ctx, width, height);
   const tex = new pc.Texture(device, {
-    width: size,
-    height: size,
+    width,
+    height,
     format: pc.PIXELFORMAT_RGBA8,
     mipmaps: true,
     minFilter: pc.FILTER_LINEAR_MIPMAP_LINEAR,
     magFilter: pc.FILTER_LINEAR,
     anisotropy: Math.min(8, device.maxAnisotropy || 4),
-    addressU: pc.ADDRESS_REPEAT,
-    addressV: pc.ADDRESS_REPEAT,
+    addressU: repeat ? pc.ADDRESS_REPEAT : pc.ADDRESS_CLAMP_TO_EDGE,
+    addressV: repeat ? pc.ADDRESS_REPEAT : pc.ADDRESS_CLAMP_TO_EDGE,
     srgb: true,
   });
   tex.setSource(canvas);
@@ -91,10 +107,9 @@ function makeCanvasTexture(
 }
 
 function createAsphaltMaterial(device: pc.GraphicsDevice, withBikeLane: boolean): pc.StandardMaterial {
-  const tex = makeCanvasTexture(device, 512, (ctx, s) => {
+  const tex = makeCanvasTexture(device, 512, 512, (ctx, s) => {
     ctx.fillStyle = '#2d323a';
     ctx.fillRect(0, 0, s, s);
-    // Fine asphalt aggregate grain
     for (let i = 0; i < 4200; i++) {
       const x = (Math.sin(i * 12.9898) * 43758.5453) % 1;
       const y = (Math.sin(i * 78.233) * 19341.123) % 1;
@@ -102,17 +117,14 @@ function createAsphaltMaterial(device: pc.GraphicsDevice, withBikeLane: boolean)
       ctx.fillStyle = `rgb(${v},${v + 2},${v + 5})`;
       ctx.fillRect(Math.abs(x) * s, Math.abs(y) * s, 2, 2);
     }
-    // Subtle wheel tire tracks
     ctx.fillStyle = 'rgba(18, 22, 28, 0.24)';
     ctx.fillRect(s * 0.24, 0, s * 0.16, s);
     ctx.fillRect(s * 0.6, 0, s * 0.16, s);
 
-    // Side edge white lines
     ctx.fillStyle = '#e8edf4';
     ctx.fillRect(s * 0.04, 0, 5, s);
     ctx.fillRect(s * 0.96 - 5, 0, 5, s);
 
-    // Optional green California protected bike lanes on shoulders
     if (withBikeLane) {
       ctx.fillStyle = 'rgba(42, 148, 86, 0.72)';
       ctx.fillRect(s * 0.055, 0, s * 0.065, s);
@@ -122,7 +134,6 @@ function createAsphaltMaterial(device: pc.GraphicsDevice, withBikeLane: boolean)
       ctx.fillRect(s * 0.875 - 3, 0, 3, s);
     }
 
-    // Center dashed yellow double-line
     ctx.fillStyle = '#f2c138';
     for (let y = 18; y < s; y += 84) {
       ctx.fillRect(s * 0.5 - 6, y, 4, 48);
@@ -140,20 +151,20 @@ function createAsphaltMaterial(device: pc.GraphicsDevice, withBikeLane: boolean)
 }
 
 function createGrassMaterial(device: pc.GraphicsDevice): pc.StandardMaterial {
-  const tex = makeCanvasTexture(device, 512, (ctx, s) => {
-    ctx.fillStyle = '#4e7942';
+  const tex = makeCanvasTexture(device, 512, 512, (ctx, s) => {
+    ctx.fillStyle = '#4c7840';
     ctx.fillRect(0, 0, s, s);
     for (let i = 0; i < 6500; i++) {
       const x = Math.abs((Math.sin(i * 19.19) * 31415.9) % 1) * s;
       const y = Math.abs((Math.cos(i * 41.37) * 27182.8) % 1) * s;
-      const g = 104 + (i % 34);
-      ctx.fillStyle = `rgb(${Math.round(g * 0.64)},${g},${Math.round(g * 0.52)})`;
+      const g = 102 + (i % 34);
+      ctx.fillStyle = `rgb(${Math.round(g * 0.64)},${g},${Math.round(g * 0.50)})`;
       ctx.fillRect(x, y, 3, 3);
     }
   });
   const m = new pc.StandardMaterial();
   m.diffuseMap = tex;
-  m.diffuseMapTiling = new pc.Vec2(72, 72);
+  m.diffuseMapTiling = new pc.Vec2(90, 90);
   m.useMetalness = true;
   m.metalness = 0.0;
   m.gloss = 0.12;
@@ -162,7 +173,7 @@ function createGrassMaterial(device: pc.GraphicsDevice): pc.StandardMaterial {
 }
 
 function createPaverMaterial(device: pc.GraphicsDevice, tileX: number, tileY: number): pc.StandardMaterial {
-  const tex = makeCanvasTexture(device, 512, (ctx, s) => {
+  const tex = makeCanvasTexture(device, 512, 512, (ctx, s) => {
     ctx.fillStyle = '#cbc3b4';
     ctx.fillRect(0, 0, s, s);
     const step = 64;
@@ -185,18 +196,193 @@ function createPaverMaterial(device: pc.GraphicsDevice, tileX: number, tileY: nu
   return m;
 }
 
-function createWaterMaterial(): pc.StandardMaterial {
+function createAnimatedWaterMaterial(device: pc.GraphicsDevice, tileX: number, tileY: number): pc.StandardMaterial {
+  const tex = makeCanvasTexture(device, 512, 512, (ctx, s) => {
+    const grad = ctx.createLinearGradient(0, 0, s, s);
+    grad.addColorStop(0, '#0d5e82');
+    grad.addColorStop(0.5, '#1277a0');
+    grad.addColorStop(1, '#0b5678');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, s, s);
+
+    // Shimmering water caustics & gentle river current ripples
+    for (let i = 0; i < 160; i++) {
+      const x = Math.abs((Math.sin(i * 37.1) * 18371.7) % 1) * s;
+      const y = Math.abs((Math.cos(i * 91.3) * 29481.3) % 1) * s;
+      const rw = 26 + (i % 48);
+      const rh = 4 + (i % 6);
+      ctx.fillStyle = i % 3 === 0 ? 'rgba(185, 240, 255, 0.22)' : 'rgba(110, 215, 245, 0.16)';
+      ctx.beginPath();
+      ctx.ellipse(x, y, rw, rh, 0.15, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (let i = 0; i < 65; i++) {
+      const x = Math.abs((Math.sin(i * 73.7) * 41231.1) % 1) * s;
+      const y = Math.abs((Math.cos(i * 19.7) * 15912.9) % 1) * s;
+      ctx.strokeStyle = 'rgba(220, 250, 255, 0.18)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 10 + (i % 18), 0, Math.PI * 1.4);
+      ctx.stroke();
+    }
+  });
+
   const m = new pc.StandardMaterial();
-  m.diffuse.set(0.08, 0.34, 0.52);
+  m.diffuseMap = tex;
+  m.diffuseMapTiling = new pc.Vec2(tileX, tileY);
+  m.diffuse.set(0.88, 0.96, 1.0);
+  m.emissive.set(0.04, 0.16, 0.24);
+  m.emissiveIntensity = 0.35;
   m.useMetalness = true;
-  m.metalness = 0.25;
-  m.gloss = 0.92;
+  m.metalness = 0.22;
+  m.gloss = 0.94;
   m.update();
   return m;
 }
 
 // ============================================================================
-// Architectural Tashkent TV Tower Fallback (Sleek Sculpted Tripod + Spire)
+// Upright Illuminated Roadside Monument Signs ("SAMARQAND 2027" & "ABDURAZOKHOV")
+// ============================================================================
+function buildStandingLandmarkSign(
+  device: pc.GraphicsDevice,
+  opts: {
+    name: string;
+    title: string;
+    subtitle: string;
+    accentHex: string;
+    bgTop: string;
+    bgBot: string;
+    width: number;
+    height: number;
+  }
+): pc.Entity {
+  const root = new pc.Entity(opts.name);
+
+  const tex = makeCanvasTexture(
+    device,
+    1024,
+    384,
+    (ctx, w, h) => {
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, opts.bgTop);
+      g.addColorStop(1, opts.bgBot);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+
+      // Decorative Samarkand / modern architectural gold border
+      ctx.strokeStyle = opts.accentHex;
+      ctx.lineWidth = 14;
+      ctx.strokeRect(16, 16, w - 32, h - 32);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(32, 32, w - 64, h - 64);
+
+      // Top subtitle
+      ctx.fillStyle = opts.accentHex;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '800 42px "Inter", "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(opts.subtitle.toUpperCase(), w * 0.5, h * 0.27);
+
+      // Bold primary monument title (auto-fitted cleanly)
+      let fontSize = 112;
+      ctx.font = `900 ${fontSize}px "Arial Black", "Inter", system-ui, sans-serif`;
+      while (fontSize > 58 && ctx.measureText(opts.title).width > w - 110) {
+        fontSize -= 4;
+        ctx.font = `900 ${fontSize}px "Arial Black", "Inter", system-ui, sans-serif`;
+      }
+      ctx.shadowColor = 'rgba(0,0,0,0.65)';
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(opts.title, w * 0.5, h * 0.63);
+      ctx.shadowBlur = 0;
+
+      // Subtle glowing bottom accent stripe
+      ctx.fillStyle = opts.accentHex;
+      ctx.fillRect(w * 0.28, h * 0.84, w * 0.44, 7);
+    },
+    false
+  );
+
+  const faceMat = new pc.StandardMaterial();
+  faceMat.diffuse.set(1, 1, 1);
+  faceMat.diffuseMap = tex;
+  faceMat.emissive.set(1, 1, 1);
+  faceMat.emissiveMap = tex;
+  faceMat.emissiveIntensity = 0.52;
+  faceMat.useMetalness = true;
+  faceMat.metalness = 0.15;
+  faceMat.gloss = 0.65;
+  faceMat.update();
+
+  const frameMat = new pc.StandardMaterial();
+  frameMat.diffuse.set(0.11, 0.14, 0.20);
+  frameMat.useMetalness = true;
+  frameMat.metalness = 0.65;
+  frameMat.gloss = 0.72;
+  frameMat.update();
+
+  const goldMat = new pc.StandardMaterial();
+  goldMat.diffuse.set(0.92, 0.75, 0.34);
+  goldMat.useMetalness = true;
+  goldMat.metalness = 0.82;
+  goldMat.gloss = 0.82;
+  goldMat.update();
+
+  const postH = opts.height * 0.42;
+  const boardCenterY = postH + opts.height * 0.5;
+
+  // Two sleek upright steel columns
+  for (const side of [-1, 1]) {
+    const col = new pc.Entity(`${opts.name}_Post_${side}`);
+    col.setLocalPosition(side * (opts.width * 0.38), postH * 0.5, 0);
+    col.setLocalScale(0.28, postH + 0.4, 0.28);
+    col.addComponent('render', { type: 'cylinder', material: frameMat, castShadows: true, receiveShadows: true });
+    root.addChild(col);
+
+    const baseCollar = new pc.Entity(`${opts.name}_Base_${side}`);
+    baseCollar.setLocalPosition(side * (opts.width * 0.38), 0.12, 0);
+    baseCollar.setLocalScale(0.56, 0.24, 0.56);
+    baseCollar.addComponent('render', { type: 'cylinder', material: goldMat, castShadows: true, receiveShadows: true });
+    root.addChild(baseCollar);
+  }
+
+  // Main architectural signboard cabinet
+  const board = new pc.Entity(`${opts.name}_Board`);
+  board.setLocalPosition(0, boardCenterY, 0);
+  board.setLocalScale(opts.width + 0.22, opts.height + 0.18, 0.32);
+  board.addComponent('render', { type: 'box', material: frameMat, castShadows: true, receiveShadows: true });
+  root.addChild(board);
+
+  // Gold top cap trim
+  const trim = new pc.Entity(`${opts.name}_TopTrim`);
+  trim.setLocalPosition(0, boardCenterY + opts.height * 0.5 + 0.12, 0);
+  trim.setLocalScale(opts.width + 0.34, 0.1, 0.38);
+  trim.addComponent('render', { type: 'box', material: goldMat, castShadows: false });
+  root.addChild(trim);
+
+  // Front crisp readable face (+Z)
+  const faceFront = new pc.Entity(`${opts.name}_FaceFront`);
+  faceFront.setLocalPosition(0, boardCenterY, 0.17);
+  faceFront.setLocalEulerAngles(90, 0, 0);
+  faceFront.setLocalScale(opts.width, 1, opts.height);
+  faceFront.addComponent('render', { type: 'plane', material: faceMat, castShadows: false, receiveShadows: false });
+  root.addChild(faceFront);
+
+  // Back crisp readable face (-Z) so readable from both sides of the boulevard!
+  const faceBack = new pc.Entity(`${opts.name}_FaceBack`);
+  faceBack.setLocalPosition(0, boardCenterY, -0.17);
+  faceBack.setLocalEulerAngles(-90, 180, 0);
+  faceBack.setLocalScale(opts.width, 1, opts.height);
+  faceBack.addComponent('render', { type: 'plane', material: faceMat, castShadows: false, receiveShadows: false });
+  root.addChild(faceBack);
+
+  return root;
+}
+
+// ============================================================================
+// Architectural Tashkent TV Tower Stand-in (Clean flat base — ZERO stones!)
 // Replaced automatically when models/tashkent.glb is loaded!
 // ============================================================================
 function buildArchitecturalTashkentTower(): pc.Entity {
@@ -224,9 +410,8 @@ function buildArchitecturalTashkentTower(): pc.Entity {
     return m;
   };
 
-  const steelWhite = mkMat(0.9, 0.92, 0.95, 0.45, 0.62);
-  const steelSilver = mkMat(0.76, 0.8, 0.86, 0.72, 0.76);
-  const marbleBase = mkMat(0.86, 0.83, 0.77, 0.12, 0.48);
+  const steelWhite = mkMat(0.88, 0.90, 0.94, 0.45, 0.62);
+  const steelSilver = mkMat(0.74, 0.78, 0.84, 0.72, 0.76);
   const glassBlue = mkMat(0.14, 0.36, 0.56, 0.35, 0.95, [0.16, 0.45, 0.78], 0.35);
   const goldAccent = mkMat(0.94, 0.78, 0.36, 0.85, 0.84, [1.0, 0.76, 0.28], 0.55);
   const beaconRed = mkMat(1.0, 0.16, 0.12, 0.1, 0.8, [1.0, 0.18, 0.14], 2.8);
@@ -249,68 +434,50 @@ function buildArchitecturalTashkentTower(): pc.Entity {
     return e;
   };
 
-  // Stepped circular marble podium + entrance rotunda
-  addCyl('Tower_Podium_1', [0, 0.55, 0], 17.5, 1.1, 17.5, marbleBase);
-  addCyl('Tower_Podium_2', [0, 1.5, 0], 13.5, 1.2, 13.5, marbleBase);
-  addCyl('Tower_Foyer_Glass', [0, 3.6, 0], 10.6, 3.4, 10.6, glassBlue);
-  addCyl('Tower_Foyer_Crown', [0, 5.5, 0], 11.4, 0.65, 11.4, steelWhite);
+  addCyl('Tower_Foyer_Glass', [0, 2.2, 0], 9.2, 4.4, 9.2, glassBlue);
+  addCyl('Tower_Foyer_Crown', [0, 4.5, 0], 10.2, 0.65, 10.2, steelWhite);
+  addCyl('Tower_Core_Lower', [0, 18.5, 0], 4.2, 28.0, 4.2, steelWhite);
+  addCyl('Tower_Core_Upper', [0, 42.0, 0], 3.1, 22.0, 3.1, steelWhite);
 
-  // Central core shaft rising 52m
-  addCyl('Tower_Core_Lower', [0, 19.5, 0], 4.2, 28.0, 4.2, steelWhite);
-  addCyl('Tower_Core_Upper', [0, 43.0, 0], 3.1, 22.0, 3.1, steelWhite);
-
-  // Signature Tashkent TV Tower 3 Inclined Tripod Lattice Buttresses (120° apart!)
   for (let i = 0; i < 3; i++) {
-    const ang = (i * 120 * Math.PI) / 180;
     const armHolder = new pc.Entity(`TripodLeg_${i}`);
     armHolder.setLocalEulerAngles(0, i * 120, 0);
     tower.addChild(armHolder);
 
-    // Tapered inclined outer leg leaning inward from r=9.8m at base to r=2.2m at y=28m
     const leg = new pc.Entity(`LegShaft_${i}`);
-    leg.setLocalPosition(0, 14.2, 6.2);
+    leg.setLocalPosition(0, 13.8, 6.0);
     leg.setLocalEulerAngles(-15.5, 0, 0);
-    leg.setLocalScale(1.85, 29.0, 1.45);
+    leg.setLocalScale(1.75, 29.0, 1.4);
     leg.addComponent('render', { type: 'cylinder', material: steelSilver, castShadows: true, receiveShadows: true });
     armHolder.addChild(leg);
 
-    // Fin rib bracing
     const rib = new pc.Entity(`LegRib_${i}`);
-    rib.setLocalPosition(0, 10.5, 4.4);
+    rib.setLocalPosition(0, 10.0, 4.2);
     rib.setLocalEulerAngles(-24, 0, 0);
-    rib.setLocalScale(0.6, 17.0, 1.8);
+    rib.setLocalScale(0.55, 17.0, 1.7);
     rib.addComponent('render', { type: 'cylinder', material: steelWhite, castShadows: true });
     armHolder.addChild(rib);
-
-    // Decorative base anchor foot
-    const footX = Math.sin(ang) * 9.8;
-    const footZ = Math.cos(ang) * 9.8;
-    addCyl(`LegFoot_${i}`, [footX, 1.2, footZ], 3.0, 2.4, 3.0, marbleBase);
   }
 
-  // Iconic Mid-Height Observation Deck & Rotating "Koinot" Restaurant Pod (y = 28..37m)
-  addCyl('Pod_Underside', [0, 27.2, 0], 8.6, 1.6, 8.6, steelSilver);
-  addCyl('Pod_GoldRing_Lower', [0, 28.4, 0], 10.8, 0.55, 10.8, goldAccent);
-  addCyl('Pod_ObservationGlass', [0, 30.8, 0], 11.4, 4.1, 11.4, glassBlue);
-  addCyl('Pod_MidCollar', [0, 33.1, 0], 11.8, 0.7, 11.8, steelWhite);
-  addCyl('Pod_RestaurantGlass', [0, 35.1, 0], 10.2, 3.3, 10.2, glassBlue);
-  addCyl('Pod_GoldRing_Upper', [0, 37.0, 0], 10.5, 0.55, 10.5, goldAccent);
-  addCyl('Pod_RoofCap', [0, 38.4, 0], 8.0, 2.2, 8.0, steelSilver);
+  addCyl('Pod_Underside', [0, 26.5, 0], 8.6, 1.6, 8.6, steelSilver);
+  addCyl('Pod_GoldRing_Lower', [0, 27.7, 0], 10.8, 0.55, 10.8, goldAccent);
+  addCyl('Pod_ObservationGlass', [0, 30.1, 0], 11.4, 4.1, 11.4, glassBlue);
+  addCyl('Pod_MidCollar', [0, 32.4, 0], 11.8, 0.7, 11.8, steelWhite);
+  addCyl('Pod_RestaurantGlass', [0, 34.4, 0], 10.2, 3.3, 10.2, glassBlue);
+  addCyl('Pod_GoldRing_Upper', [0, 36.3, 0], 10.5, 0.55, 10.5, goldAccent);
+  addCyl('Pod_RoofCap', [0, 37.7, 0], 8.0, 2.2, 8.0, steelSilver);
 
-  // Upper Broadcast Galleries (y = 48..55m)
-  addCyl('UpperDeck_1', [0, 49.0, 0], 6.2, 2.0, 6.2, steelWhite);
-  addCyl('UpperDeck_Glass', [0, 51.0, 0], 5.6, 2.0, 5.6, glassBlue);
-  addCyl('UpperDeck_Gold', [0, 52.3, 0], 6.4, 0.45, 6.4, goldAccent);
+  addCyl('UpperDeck_1', [0, 48.2, 0], 6.2, 2.0, 6.2, steelWhite);
+  addCyl('UpperDeck_Glass', [0, 50.2, 0], 5.6, 2.0, 5.6, glassBlue);
+  addCyl('UpperDeck_Gold', [0, 51.5, 0], 6.4, 0.45, 6.4, goldAccent);
 
-  // Slender Tapered Antenna Spire (y = 53..84m)
-  addCyl('Spire_Stage1', [0, 58.0, 0], 1.75, 11.0, 1.75, steelSilver);
-  addCyl('Spire_Stage2', [0, 67.5, 0], 1.05, 10.0, 1.05, steelWhite);
-  addCyl('Spire_Stage3', [0, 76.5, 0], 0.52, 9.5, 0.52, steelSilver);
-  addCyl('Spire_Needle', [0, 82.8, 0], 0.2, 4.5, 0.2, steelWhite);
+  addCyl('Spire_Stage1', [0, 57.2, 0], 1.75, 11.0, 1.75, steelSilver);
+  addCyl('Spire_Stage2', [0, 66.7, 0], 1.05, 10.0, 1.05, steelWhite);
+  addCyl('Spire_Stage3', [0, 75.7, 0], 0.52, 9.5, 0.52, steelSilver);
+  addCyl('Spire_Needle', [0, 82.0, 0], 0.2, 4.5, 0.2, steelWhite);
 
-  // Red Aviation Warning Beacon at peak
   const beacon = new pc.Entity('Tashkent_PeakBeacon');
-  beacon.setLocalPosition(0, 85.2, 0);
+  beacon.setLocalPosition(0, 84.4, 0);
   beacon.setLocalScale(0.75, 0.75, 0.75);
   beacon.addComponent('render', { type: 'sphere', material: beaconRed, castShadows: false });
   tower.addChild(beacon);
@@ -319,8 +486,146 @@ function buildArchitecturalTashkentTower(): pc.Entity {
 }
 
 // ============================================================================
-// Helper: Load GLB ContainerResource & Extract Named Sub-Entities Cleanly
+// Grand Architectural Registon Square Stand-in (~96m x 84m, ~20% Map Footprint!)
+// Automatically replaced when models/registon_opt.glb is dropped or loaded!
 // ============================================================================
+function buildArchitecturalRegistonSquare(device: pc.GraphicsDevice): pc.Entity {
+  const registon = new pc.Entity('RegistonSquare_Architectural');
+
+  // Authentic Samarkand Majolica Tile Texture (Cobalt Blue, Turquoise, Warm Ochre & Gold!)
+  const tileTex = makeCanvasTexture(device, 512, 512, (ctx, s) => {
+    ctx.fillStyle = '#c89e69';
+    ctx.fillRect(0, 0, s, s);
+    // Ornamental brick & turquoise geometric mosaic bands
+    for (let y = 0; y < s; y += 32) {
+      ctx.fillStyle = y % 64 === 0 ? '#114d7c' : '#18889c';
+      ctx.fillRect(0, y, s, 8);
+      for (let x = 0; x < s; x += 32) {
+        ctx.fillStyle = (x + y) % 64 === 0 ? '#e6be58' : '#136592';
+        ctx.fillRect(x + 6, y + 12, 20, 14);
+      }
+    }
+  });
+
+  const mosaicMat = new pc.StandardMaterial();
+  mosaicMat.diffuseMap = tileTex;
+  mosaicMat.diffuseMapTiling = new pc.Vec2(4, 3);
+  mosaicMat.useMetalness = true;
+  mosaicMat.metalness = 0.14;
+  mosaicMat.gloss = 0.62;
+  mosaicMat.update();
+
+  const sandstoneMat = new pc.StandardMaterial();
+  sandstoneMat.diffuse.set(0.81, 0.68, 0.49);
+  sandstoneMat.useMetalness = true;
+  sandstoneMat.metalness = 0.04;
+  sandstoneMat.gloss = 0.25;
+  sandstoneMat.update();
+
+  const turquoiseDomeMat = new pc.StandardMaterial();
+  turquoiseDomeMat.diffuse.set(0.08, 0.58, 0.74);
+  turquoiseDomeMat.emissive.set(0.04, 0.24, 0.34);
+  turquoiseDomeMat.emissiveIntensity = 0.32;
+  turquoiseDomeMat.useMetalness = true;
+  turquoiseDomeMat.metalness = 0.22;
+  turquoiseDomeMat.gloss = 0.86;
+  turquoiseDomeMat.update();
+
+  const goldMat = new pc.StandardMaterial();
+  goldMat.diffuse.set(0.95, 0.78, 0.30);
+  goldMat.useMetalness = true;
+  goldMat.metalness = 0.88;
+  goldMat.gloss = 0.85;
+  goldMat.update();
+
+  const darkArchMat = new pc.StandardMaterial();
+  darkArchMat.diffuse.set(0.11, 0.18, 0.30);
+  darkArchMat.useMetalness = true;
+  darkArchMat.metalness = 0.1;
+  darkArchMat.gloss = 0.32;
+  darkArchMat.update();
+
+  const addShape = (
+    parent: pc.Entity,
+    name: string,
+    type: 'box' | 'cylinder' | 'sphere' | 'cone',
+    pos: [number, number, number],
+    scale: [number, number, number],
+    mat: pc.Material
+  ) => {
+    const e = new pc.Entity(name);
+    e.setLocalPosition(pos[0], pos[1], pos[2]);
+    e.setLocalScale(scale[0], scale[1], scale[2]);
+    e.addComponent('render', { type, material: mat, castShadows: true, receiveShadows: true });
+    parent.addChild(e);
+    return e;
+  };
+
+  // Raised travertine stone podium platform (96m x 84m)
+  addShape(registon, 'Registon_Podium', 'box', [0, 0.45, 0], [96, 0.9, 84], sandstoneMat);
+
+  // Helper to construct a grand Samarkand Madrasa (Pishtaq Portal + Turquoise Dome + Flanking Wings + Minarets)
+  const buildMadrasa = (
+    name: string,
+    x: number,
+    z: number,
+    yawDeg: number,
+    width: number,
+    height: number,
+    withTwinDomes: boolean
+  ) => {
+    const m = new pc.Entity(name);
+    m.setLocalPosition(x, 0.9, z);
+    m.setLocalEulerAngles(0, yawDeg, 0);
+    registon.addChild(m);
+
+    // Main wing masonry walls
+    addShape(m, `${name}_MainBlock`, 'box', [0, height * 0.36, -6], [width, height * 0.72, 16], sandstoneMat);
+    addShape(m, `${name}_FrontFacade`, 'box', [0, height * 0.36, 2.2], [width * 0.96, height * 0.68, 1.2], mosaicMat);
+
+    // Towering Central Pishtaq Portal Arch
+    addShape(m, `${name}_Pishtaq`, 'box', [0, height * 0.56, 3.4], [width * 0.42, height * 1.12, 3.8], mosaicMat);
+    addShape(m, `${name}_IwanRecess`, 'box', [0, height * 0.40, 4.9], [width * 0.25, height * 0.78, 1.6], darkArchMat);
+    addShape(m, `${name}_PishtaqCrown`, 'box', [0, height * 1.13, 3.4], [width * 0.44, 0.8, 4.2], goldMat);
+
+    // Iconic Samarkand Ribbed Turquoise Dome(s)
+    if (withTwinDomes) {
+      for (const sx of [-width * 0.27, width * 0.27]) {
+        addShape(m, `${name}_Drum_${sx}`, 'cylinder', [sx, height * 0.80, -3], [9.2, 5.5, 9.2], mosaicMat);
+        addShape(m, `${name}_Dome_${sx}`, 'sphere', [sx, height * 0.98, -3], [10.6, 11.2, 10.6], turquoiseDomeMat);
+        addShape(m, `${name}_Finial_${sx}`, 'cone', [sx, height * 1.24, -3], [1.2, 3.6, 1.2], goldMat);
+      }
+    } else {
+      addShape(m, `${name}_Drum`, 'cylinder', [0, height * 0.86, -5], [12.5, 6.8, 12.5], mosaicMat);
+      addShape(m, `${name}_Dome`, 'sphere', [0, height * 1.08, -5], [14.2, 14.5, 14.2], turquoiseDomeMat);
+      addShape(m, `${name}_Finial`, 'cone', [0, height * 1.40, -5], [1.4, 4.2, 1.4], goldMat);
+    }
+
+    // Corner Turquoise-Crowned Minarets
+    for (const side of [-1, 1]) {
+      const mx = side * (width * 0.51);
+      addShape(m, `${name}_Minaret_${side}`, 'cylinder', [mx, height * 0.72, 2.5], [3.6, height * 1.44, 3.6], mosaicMat);
+      addShape(m, `${name}_Lantern_${side}`, 'cylinder', [mx, height * 1.48, 2.5], [4.2, 2.6, 4.2], turquoiseDomeMat);
+      addShape(m, `${name}_Cap_${side}`, 'sphere', [mx, height * 1.60, 2.5], [3.8, 3.0, 3.8], goldMat);
+    }
+  };
+
+  // Classic 3-Madrasa U-shaped Registon Ensemble opening toward the front boulevard!
+  // Center: Tilya-Kori Madrasa
+  buildMadrasa('TilyaKori_Madrasa', 0, -24, 0, 56, 22, false);
+  // West: Ulugh Beg Madrasa
+  buildMadrasa('UlughBeg_Madrasa', -32, 8, 90, 48, 21, true);
+  // East: Sher-Dor Madrasa
+  buildMadrasa('SherDor_Madrasa', 32, 8, -90, 48, 21, true);
+
+  // Ornamental perimeter stone balustrade so it looks authentically enclosed
+  addShape(registon, 'FrontBalustrade_L', 'box', [-28, 1.5, 41], [36, 1.3, 1.4], sandstoneMat);
+  addShape(registon, 'FrontBalustrade_R', 'box', [28, 1.5, 41], [36, 1.3, 1.4], sandstoneMat);
+  addShape(registon, 'FrontGateArch', 'box', [0, 1.5, 41], [20, 1.2, 1.2], mosaicMat);
+
+  return registon;
+}
+
 function loadContainerUrl(app: pc.Application, url: string, name: string): Promise<pc.ContainerResource> {
   return new Promise((resolve, reject) => {
     const asset = new pc.Asset(name, 'container', { url });
@@ -361,16 +666,75 @@ function computeEntityBounds(root: pc.Entity): pc.BoundingBox | null {
   return box;
 }
 
-function tuneWorldEntityShadows(entity: pc.Entity, castShadows: boolean, receiveShadows = true): void {
+/**
+ * Tunes shadow flags AND fixes pure-white blown-out GLB building materials!
+ * (e.g. Mat_Pavilion_Arch_V5, Mat_Campus_Street_V3, Mat_Campus_Office_Parallax_Rooms_V6
+ *  which export with raw emissive=[1,1,1] that washes buildings pure white under ACES HDR!)
+ */
+function tuneWorldEntityMaterials(entity: pc.Entity, castShadows: boolean, receiveShadows = true): void {
   const comps = entity.findComponents('render') as pc.RenderComponent[];
+  const fixedMats = new Set<pc.Material>();
   for (const rc of comps) {
     rc.castShadows = castShadows;
     rc.receiveShadows = receiveShadows;
+    for (const mi of rc.meshInstances) {
+      const mat = mi.material;
+      if (!(mat instanceof pc.StandardMaterial) || fixedMats.has(mat)) continue;
+      fixedMats.add(mat);
+
+      const mName = (mat.name || '').toLowerCase();
+      const isLampGlow = /lamp|light|beacon|glow|neon|led/i.test(mName);
+      if (!isLampGlow) {
+        const em = mat.emissive;
+        const emLum = em.r * 0.3 + em.g * 0.59 + em.b * 0.11;
+        if (!mat.emissiveMap && emLum > 0.35) {
+          // Kill blown-out solid white emissive that made buildings pure white!
+          mat.emissive.set(0, 0, 0);
+          mat.emissiveIntensity = 0;
+          // Give untextured white architectural slabs warm realistic sandstone/concrete tone
+          if (!mat.diffuseMap && mat.diffuse.r > 0.88 && mat.diffuse.g > 0.88 && mat.diffuse.b > 0.88) {
+            mat.diffuse.set(0.76, 0.74, 0.70);
+          }
+          mat.update();
+        } else if (mat.emissiveMap && mat.emissiveIntensity > 0.22) {
+          mat.emissiveIntensity = 0.16;
+          mat.update();
+        }
+      }
+    }
   }
 }
 
+// Traffic Loops along the campus main boulevards (Right-Hand Traffic!)
+const TRAFFIC_ROUTES: Array<Array<{ x: number; z: number }>> = [
+  [
+    { x: -114, z: 79.4 },
+    { x: 152, z: 79.4 },
+    { x: 152, z: -21.4 },
+    { x: -114, z: -21.4 },
+  ],
+  [
+    { x: -121.5, z: -14.6 },
+    { x: -121.5, z: 72.6 },
+    { x: -3.5, z: 72.6 },
+    { x: -3.5, z: 54 },
+    { x: -24, z: 29 },
+    { x: -3.5, z: 4 },
+    { x: -3.5, z: -14.6 },
+  ],
+  [
+    { x: 3.5, z: 54 },
+    { x: 3.5, z: 72.6 },
+    { x: 159.5, z: 72.6 },
+    { x: 159.5, z: -82.5 },
+    { x: 3.5, z: -82.5 },
+    { x: 3.5, z: 4 },
+    { x: 24, z: 29 },
+  ],
+];
+
 // ============================================================================
-// Build Full Mountain View Open Campus + Central Tashkent TV Tower Plaza
+// Build Full Mountain View Campus + Registon Square + River + Tashkent Plaza
 // ============================================================================
 export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean): OpenWorldHandle {
   const root = new pc.Entity('CampusOpenWorldRoot');
@@ -384,17 +748,20 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     { x: -92.0, z: 76.0, yawDeg: -90, width: 3.8, length: 6.4, height: 1.15 },
     { x: 156.0, z: 32.0, yawDeg: 0, width: 4.4, length: 7.4, height: 1.42 },
   ];
-  const checkpoints: CheckpointRing[] = [];
-  const waymoAgents: WaymoAgent[] = [];
+  const trafficAgents: TrafficAgent[] = [];
   const pinwheelRotors: pc.Entity[] = [];
+  const swayingFoliage: SwayItem[] = [];
+  const animatedWaters: pc.StandardMaterial[] = [];
 
   const TASHKENT_CENTER = { x: 0, z: 29 };
+  // Grand Registon Square right in front of the towering NW Santa Cruz mountains (~20% map footprint!)
+  const REGISTON_CENTER = { x: -158, z: -156 };
 
-  // 1. Expansive Campus Lawn Terrain Plane (zero void!)
+  // 1. Expansive Campus Lawn Terrain Plane
   const grassMat = createGrassMaterial(device);
   const ground = new pc.Entity('CampusGrassTerrain');
-  ground.setLocalPosition(0, -0.02, 0);
-  ground.setLocalScale(960, 1, 960);
+  ground.setLocalPosition(0, -0.04, 0);
+  ground.setLocalScale(1200, 1, 1200);
   ground.addComponent('render', {
     type: 'plane',
     material: grassMat,
@@ -403,12 +770,11 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
   });
   root.addChild(ground);
 
-  // 2. Authentic Mountain View Campus Road Network (from contract.js)
+  // 2. Authentic Mountain View Campus Road Network + Registon Ceremonial Approach Boulevard
   const asphaltBikeMat = createAsphaltMaterial(device, true);
   const asphaltPlainMat = createAsphaltMaterial(device, false);
   const paverMat = createPaverMaterial(device, 8, 8);
   const plazaPaverMat = createPaverMaterial(device, 12, 12);
-  const waterMat = createWaterMaterial();
 
   const addRoadSegment = (
     name: string,
@@ -450,19 +816,19 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     root.addChild(seg);
   };
 
-  // Main Boulevards
-  addRoadSegment('Charleston_Rd', -195, 76, 164, 76, 14.5, 0.03, asphaltBikeMat);
-  addRoadSegment('Amphitheatre_Pkwy', -195, -18, 164, -18, 14.5, 0.03, asphaltBikeMat);
+  addRoadSegment('Charleston_Rd', -205, 76, 168, 76, 14.5, 0.03, asphaltBikeMat);
+  addRoadSegment('Amphitheatre_Pkwy', -205, -18, 168, -18, 14.5, 0.03, asphaltBikeMat);
   addRoadSegment('Gradient_Dropoff', -56, 116, 56, 116, 11.0, 0.035, plazaPaverMat, false);
   addRoadSegment('North_Creek_Trail', 0, -86, 164, -86, 12.0, 0.03, asphaltBikeMat);
   addRoadSegment('Shoreline_Blvd_South', 0, 122, 0, 52, 14.5, 0.032, asphaltBikeMat);
   addRoadSegment('Shoreline_Blvd_North', 0, 6, 0, -86, 14.5, 0.032, asphaltBikeMat);
   addRoadSegment('West_Campus_Ave', -118, 92, -118, -18, 13.5, 0.03, asphaltBikeMat);
-  addRoadSegment('Stan_Courtyard_Walk', -118, -18, -118, -72, 10.5, 0.036, paverMat, false);
+  addRoadSegment('Stan_Courtyard_Walk', -118, -18, -118, -104, 12.0, 0.036, paverMat, false);
+  // Grand Samarqand / Registon Esplanade Avenue leading straight from Stan Plaza & North Creek to Registon Square!
+  addRoadSegment('Registon_Esplanade', -118, -104, 0, -86, 12.5, 0.034, plazaPaverMat, false);
   addRoadSegment('Bay_View_Promenade', 156, 112, 156, -86, 16.5, 0.036, paverMat, false);
   addRoadSegment('Shoreline_Esplanade', 18, -158, 12, -192, 11.0, 0.036, paverMat, false);
 
-  // Intersection Junction Pads (clean asphalt disks so road crossings never z-fight)
   const intersections = [
     [0, 116, 10],
     [0, 76, 11],
@@ -474,6 +840,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     [0, -86, 10],
     [52, -86, 9],
     [156, -86, 10],
+    [-118, -102, 11],
   ];
   for (let i = 0; i < intersections.length; i++) {
     const [ix, iz, rad] = intersections[i];
@@ -489,7 +856,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     root.addChild(pad);
   }
 
-  // Grand Central Plaza & Roundabout for TASHKENT TV TOWER at (0, 0, 29)
+  // Clean Flat Central Roundabout Plaza for TASHKENT TV TOWER
   const roundaboutAsphalt = new pc.Entity('Tashkent_Roundabout_Road');
   roundaboutAsphalt.setLocalPosition(TASHKENT_CENTER.x, 0.034, TASHKENT_CENTER.z);
   roundaboutAsphalt.setLocalScale(54, 0.02, 54);
@@ -501,42 +868,76 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
   });
   root.addChild(roundaboutAsphalt);
 
-  const plazaStone = new pc.Entity('Tashkent_Central_Plaza_Stone');
-  plazaStone.setLocalPosition(TASHKENT_CENTER.x, 0.052, TASHKENT_CENTER.z);
-  plazaStone.setLocalScale(36, 0.04, 36);
-  plazaStone.addComponent('render', {
+  const plazaFlatSurface = new pc.Entity('Tashkent_Central_Plaza_Flat');
+  plazaFlatSurface.setLocalPosition(TASHKENT_CENTER.x, 0.044, TASHKENT_CENTER.z);
+  plazaFlatSurface.setLocalScale(34, 0.02, 34);
+  plazaFlatSurface.addComponent('render', {
     type: 'cylinder',
     material: plazaPaverMat,
     castShadows: false,
     receiveShadows: true,
   });
-  root.addChild(plazaStone);
+  root.addChild(plazaFlatSurface);
 
-  // Decorative reflecting pool ring around the Tashkent TV Tower base
-  const plazaPool = new pc.Entity('Tashkent_Plaza_ReflectingPool');
-  plazaPool.setLocalPosition(TASHKENT_CENTER.x, 0.068, TASHKENT_CENTER.z);
-  plazaPool.setLocalScale(22.5, 0.03, 22.5);
-  plazaPool.addComponent('render', {
-    type: 'cylinder',
-    material: waterMat,
-    castShadows: false,
-    receiveShadows: true,
-  });
-  root.addChild(plazaPool);
+  // ============================================================================
+  // ANIMATED SHIMMERING WATER: Bay View Lake + Stevens Creek River UNDER THE BRIDGE!
+  // ============================================================================
+  const lakeWaterMat = createAnimatedWaterMaterial(device, 6, 11);
+  const riverWaterMat = createAnimatedWaterMaterial(device, 2.5, 10);
+  animatedWaters.push(lakeWaterMat, riverWaterMat);
 
-  // Bay View Waterfront Retention Basin Pond (east of Bay View Promenade)
+  // 1. Bay View Waterfront Lake
   const bayPond = new pc.Entity('BayView_RetentionBasin');
-  bayPond.setLocalPosition(200, -0.01, 14);
-  bayPond.setLocalScale(78, 1, 152);
+  bayPond.setLocalPosition(198, -0.015, 14);
+  bayPond.setLocalScale(78, 1, 166);
   bayPond.addComponent('render', {
     type: 'plane',
-    material: waterMat,
+    material: lakeWaterMat,
     castShadows: false,
     receiveShadows: true,
   });
   root.addChild(bayPond);
 
-  // Gradient Canopy Visitor Forecourt Paver Apron
+  // 2. Flowing Stevens Creek River passing directly UNDERNEATH Stevens Creek Bridge (35, -122)!
+  // Bridge spans (52,-86) -> (18,-158), so river flows cleanly perpendicular across (35,-122)!
+  const addRiverChannel = (name: string, x1: number, z1: number, x2: number, z2: number, width: number) => {
+    const dx = x2 - x1;
+    const dz = z2 - z1;
+    const len = Math.hypot(dx, dz);
+    const cx = (x1 + x2) * 0.5;
+    const cz = (z1 + z2) * 0.5;
+    const yawDeg = (Math.atan2(dx, dz) * 180) / Math.PI;
+    const ent = new pc.Entity(name);
+    ent.setLocalPosition(cx, -0.012, cz);
+    ent.setLocalEulerAngles(0, yawDeg, 0);
+    ent.setLocalScale(width, 1, len);
+    ent.addComponent('render', {
+      type: 'plane',
+      material: riverWaterMat,
+      castShadows: false,
+      receiveShadows: true,
+    });
+    root.addChild(ent);
+  };
+
+  // River runs from Bay View Lake -> North-East Reach -> Right under Stevens Creek Bridge -> West Creek Pool!
+  addRiverChannel('StevensCreek_EastReach', 196, -68, 134, -148, 22);
+  addRiverChannel('StevensCreek_BridgeReach', 138, -148, -28, -104, 24); // Passes directly underneath (35, -122)!
+  addRiverChannel('StevensCreek_WestPool', -24, -104, -56, -158, 26);
+
+  // Scenic Shoreline Lagoon near the West Creek outlet
+  const creekLagoon = new pc.Entity('Shoreline_Creek_Lagoon');
+  creekLagoon.setLocalPosition(-42, -0.015, -152);
+  creekLagoon.setLocalScale(46, 0.02, 34);
+  creekLagoon.addComponent('render', {
+    type: 'cylinder',
+    material: lakeWaterMat,
+    castShadows: false,
+    receiveShadows: true,
+  });
+  root.addChild(creekLagoon);
+
+  // Forecourt & Landmark Plaza Surfaces
   const forecourt = new pc.Entity('Gradient_Visitor_Forecourt');
   forecourt.setLocalPosition(0, 0.04, 126);
   forecourt.setLocalScale(68, 1, 24);
@@ -548,7 +949,6 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
   });
   root.addChild(forecourt);
 
-  // Android Lawn & Stan Courtyard Paver Pads
   const androidPad = new pc.Entity('AndroidLawn_Plaza');
   androidPad.setLocalPosition(-118, 0.04, 96);
   androidPad.setLocalScale(32, 0.02, 26);
@@ -571,116 +971,149 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
   });
   root.addChild(stanPad);
 
-  // 3. Tashkent TV Tower Container right at the center of the main plaza (0, 0, 29)
+  // Registon Forecourt Promenade (public viewing plaza in front of solid Registon monument!)
+  const registonForecourt = new pc.Entity('Registon_Forecourt_Plaza');
+  registonForecourt.setLocalPosition(-122, 0.042, -102);
+  registonForecourt.setLocalScale(52, 1, 24);
+  registonForecourt.addComponent('render', {
+    type: 'plane',
+    material: plazaPaverMat,
+    castShadows: false,
+    receiveShadows: true,
+  });
+  root.addChild(registonForecourt);
+
+  // ============================================================================
+  // 3. UPRIGHT ILLUMINATED ROADSIDE LANDMARK SIGNS
+  //    • "ABDURAZOKHOV" right at the base/entrance of Tashkent TV Tower
+  //    • "SAMARQAND 2027" right in front of Registon Square
+  // ============================================================================
+  const abduSign = buildStandingLandmarkSign(device, {
+    name: 'Sign_Abdurazokhov',
+    title: 'ABDURAZOKHOV',
+    subtitle: 'TASHKENT TV TOWER',
+    accentHex: '#f5c754',
+    bgTop: '#0d1b36',
+    bgBot: '#071022',
+    width: 9.2,
+    height: 3.2,
+  });
+  abduSign.setLocalPosition(0, 0.05, 43.2);
+  abduSign.setLocalEulerAngles(0, 0, 0);
+  root.addChild(abduSign);
+  colliders.push({ minX: -4.8, maxX: 4.8, minZ: 42.4, maxZ: 44.0 });
+
+  const samarqandSign = buildStandingLandmarkSign(device, {
+    name: 'Sign_Samarqand2027',
+    title: 'SAMARQAND 2027',
+    subtitle: 'REGISTON MAYDONI',
+    accentHex: '#38d9f5',
+    bgTop: '#0a2948',
+    bgBot: '#07172a',
+    width: 11.4,
+    height: 3.8,
+  });
+  samarqandSign.setLocalPosition(-106, 0.05, -104);
+  samarqandSign.setLocalEulerAngles(0, 38, 0);
+  root.addChild(samarqandSign);
+  colliders.push({ minX: -110.5, maxX: -101.5, minZ: -108.5, maxZ: -99.5 });
+
+  // ============================================================================
+  // 4. TASHKENT TV TOWER at Central Plaza (0, 0.05, 29)
+  // ============================================================================
   const tashkentHolder = new pc.Entity('Tashkent_TV_Tower_Holder');
-  tashkentHolder.setLocalPosition(TASHKENT_CENTER.x, 0.07, TASHKENT_CENTER.z);
+  tashkentHolder.setLocalPosition(TASHKENT_CENTER.x, 0.05, TASHKENT_CENTER.z);
   root.addChild(tashkentHolder);
 
   let activeTashkentModel: pc.Entity = buildArchitecturalTashkentTower();
   let customTashkentLoaded = false;
   tashkentHolder.addChild(activeTashkentModel);
 
-  // Solid base collider for Tashkent TV Tower core so player/cars drive around its plaza cleanly
   colliders.push({
-    minX: TASHKENT_CENTER.x - 8.5,
-    maxX: TASHKENT_CENTER.x + 8.5,
-    minZ: TASHKENT_CENTER.z - 8.5,
-    maxZ: TASHKENT_CENTER.z + 8.5,
+    minX: TASHKENT_CENTER.x - 6.5,
+    maxX: TASHKENT_CENTER.x + 6.5,
+    minZ: TASHKENT_CENTER.z - 6.5,
+    maxZ: TASHKENT_CENTER.z + 6.5,
   });
 
-  // Campus building footprint colliders (matching real GLB office wings & Gradient Canopy)
-  const officeSpecs: Array<{ name: string; cx: number; cz: number; wx: number; wz: number; yaw: number }> = [
-    { name: 'Visitor_Timber_West', cx: -156, cz: 104, wx: 32, wz: 20, yaw: 0 },
-    { name: 'Charleston_SW_Studio', cx: -66, cz: 46, wx: 44, wz: 22, yaw: 0 },
-    { name: 'Charleston_SE_Commons', cx: 78, cz: 46, wx: 48, wz: 22, yaw: 0 },
-    { name: 'Googleplex_Bldg_40', cx: -162, cz: -52, wx: 36, wz: 24, yaw: 90 },
-    { name: 'Googleplex_Bldg_41', cx: -74, cz: -52, wx: 34, wz: 22, yaw: 0 },
-    { name: 'Googleplex_Bldg_42', cx: -66, cz: 12, wx: 42, wz: 20, yaw: 0 },
-    { name: 'North_Bayshore_Hub', cx: 78, cz: 12, wx: 48, wz: 22, yaw: 0 },
-    { name: 'Shoreline_Tech_Pavilion', cx: -32, cz: -54, wx: 32, wz: 20, yaw: 0 },
+  // ============================================================================
+  // 5. REGISTON SQUARE (registon_opt.glb) IN FRONT OF MOUNTAINS (~20% MAP, SOLID!)
+  // ============================================================================
+  const registonHolder = new pc.Entity('Registon_Square_Holder');
+  registonHolder.setLocalPosition(REGISTON_CENTER.x, 0.05, REGISTON_CENTER.z);
+  registonHolder.setLocalEulerAngles(0, 32, 0);
+  root.addChild(registonHolder);
+
+  let activeRegistonModel: pc.Entity = buildArchitecturalRegistonSquare(device);
+  let customRegistonLoaded = false;
+  registonHolder.addChild(activeRegistonModel);
+
+  // SOLID IMPASSABLE PERIMETER COLLIDER — neither cars nor player can enter inside Registon!
+  colliders.push({
+    minX: REGISTON_CENTER.x - 52,
+    maxX: REGISTON_CENTER.x + 50,
+    minZ: REGISTON_CENTER.z - 48,
+    maxZ: REGISTON_CENTER.z + 44,
+  });
+
+  // Full Dense Mountain View Campus Building Plan (16 real GLB architectural buildings — clear view to Registon!)
+  type BldgVariant = 'pavilion_v6' | 'pavilion_v5' | 'glass_v3';
+  const campusBuildings: Array<{
+    name: string;
+    cx: number;
+    cz: number;
+    wx: number;
+    wz: number;
+    hy: number;
+    yaw: number;
+    variant: BldgVariant;
+  }> = [
+    { name: 'Visitor_Timber_West', cx: -156, cz: 104, wx: 34, wz: 22, hy: 11.5, yaw: 0, variant: 'pavilion_v6' },
+    { name: 'Charleston_SW_Studio', cx: -66, cz: 46, wx: 48, wz: 24, hy: 13.0, yaw: 0, variant: 'glass_v3' },
+    { name: 'Charleston_SE_Commons', cx: 78, cz: 46, wx: 54, wz: 24, hy: 13.5, yaw: 0, variant: 'glass_v3' },
+    { name: 'Googleplex_Bldg_40', cx: -162, cz: -52, wx: 38, wz: 26, hy: 14.0, yaw: 90, variant: 'pavilion_v6' },
+    { name: 'Googleplex_Bldg_41', cx: -74, cz: -52, wx: 36, wz: 24, hy: 13.5, yaw: 0, variant: 'pavilion_v5' },
+    { name: 'Googleplex_Bldg_42', cx: -66, cz: 12, wx: 46, wz: 22, hy: 13.0, yaw: 180, variant: 'pavilion_v6' },
+    { name: 'North_Bayshore_Hub', cx: 78, cz: 12, wx: 54, wz: 24, hy: 14.5, yaw: 180, variant: 'pavilion_v6' },
+    { name: 'Shoreline_Tech_Pavilion', cx: -32, cz: -54, wx: 34, wz: 20, hy: 12.0, yaw: 180, variant: 'pavilion_v5' },
+    { name: 'Charleston_North_West_HQ', cx: -66, cz: 104, wx: 44, wz: 22, hy: 13.0, yaw: 180, variant: 'pavilion_v6' },
+    { name: 'Charleston_North_East_HQ', cx: 78, cz: 104, wx: 48, wz: 22, hy: 13.5, yaw: 180, variant: 'glass_v3' },
+    { name: 'Gradient_East_Annex', cx: 112, cz: 136, wx: 44, wz: 24, hy: 14.0, yaw: 0, variant: 'pavilion_v5' },
+    { name: 'Gradient_West_Annex', cx: -102, cz: 144, wx: 46, wz: 24, hy: 13.5, yaw: 0, variant: 'glass_v3' },
+    { name: 'West_Campus_Solar_Wing', cx: -162, cz: 28, wx: 34, wz: 26, hy: 11.0, yaw: 90, variant: 'pavilion_v5' },
+    { name: 'Amphitheatre_East_Studio', cx: 68, cz: -52, wx: 46, wz: 22, hy: 13.5, yaw: 0, variant: 'pavilion_v6' },
+    { name: 'Amphitheatre_FarEast_Lab', cx: 124, cz: -52, wx: 36, wz: 22, hy: 12.5, yaw: 180, variant: 'glass_v3' },
+    { name: 'North_Creek_Innovation', cx: 106, cz: -108, wx: 42, wz: 20, hy: 13.5, yaw: 0, variant: 'pavilion_v5' },
   ];
-  for (const b of officeSpecs) {
+
+  for (const b of campusBuildings) {
+    const hw = (b.yaw % 180 === 0 ? b.wx : b.wz) * 0.5;
+    const hd = (b.yaw % 180 === 0 ? b.wz : b.wx) * 0.5;
     colliders.push({
-      minX: b.cx - b.wx * 0.5,
-      maxX: b.cx + b.wx * 0.5,
-      minZ: b.cz - b.wz * 0.5,
-      maxZ: b.cz + b.wz * 0.5,
+      minX: b.cx - hw,
+      maxX: b.cx + hw,
+      minZ: b.cz - hd,
+      maxZ: b.cz + hd,
     });
   }
-  // Gradient Canopy collider
   colliders.push({ minX: -38, maxX: 38, minZ: 132, maxZ: 168 });
-  // Bay View Pavilions collider
   colliders.push({ minX: 180, maxX: 228, minZ: -44, maxZ: 68 });
 
-  // 4. Campus Exploration Checkpoints (Sleek golden rings at each landmark)
-  const ringMat = new pc.StandardMaterial();
-  ringMat.diffuse.set(1.0, 0.84, 0.28);
-  ringMat.emissive.set(1.0, 0.78, 0.18);
-  ringMat.emissiveIntensity = 1.6;
-  ringMat.useMetalness = true;
-  ringMat.metalness = 0.6;
-  ringMat.gloss = 0.85;
-  ringMat.update();
-
-  const checkpointDefs = [
-    { id: 'cp_tashkent_s', label: 'Tashkent Plaza', x: 0, z: 54 },
-    { id: 'cp_tashkent_e', label: 'Tashkent Ring East', x: 24, z: 29 },
-    { id: 'cp_tashkent_w', label: 'Tashkent Ring West', x: -24, z: 29 },
-    { id: 'cp_canopy', label: 'Gradient Canopy', x: 0, z: 114 },
-    { id: 'cp_charleston_w', label: 'Charleston West', x: -64, z: 76 },
-    { id: 'cp_android', label: 'Android Lawn', x: -118, z: 86 },
-    { id: 'cp_stan', label: 'Stan T-Rex Plaza', x: -118, z: -34 },
-    { id: 'cp_amphitheatre', label: 'Amphitheatre Pkwy', x: 40, z: -18 },
-    { id: 'cp_bayview_s', label: 'Bay View Promenade', x: 156, z: 58 },
-    { id: 'cp_bayview_ramp', label: 'Bay View Jump', x: 156, z: 18 },
-    { id: 'cp_bridge', label: 'Stevens Creek Bridge', x: 35, z: -122 },
-    { id: 'cp_shoreline', label: 'Shoreline Bowl', x: 14, z: -176 },
-  ];
-
-  for (const cp of checkpointDefs) {
-    const holder = new pc.Entity(`Checkpoint_${cp.id}`);
-    holder.setLocalPosition(cp.x, 1.45, cp.z);
-    const torus = new pc.Entity(`CheckpointRing_${cp.id}`);
-    torus.setLocalScale(2.8, 0.35, 2.8);
-    torus.setLocalEulerAngles(90, 0, 0);
-    torus.addComponent('render', {
-      type: 'torus',
-      material: ringMat,
-      castShadows: false,
-      receiveShadows: false,
-    });
-    holder.addChild(torus);
-    root.addChild(holder);
-    checkpoints.push({
-      id: cp.id,
-      label: cp.label,
-      x: cp.x,
-      y: 1.45,
-      z: cp.z,
-      radius: 4.5,
-      collected: false,
-      entity: holder,
-      ringMesh: torus,
-    });
-  }
-
-  // 5. Dynamic Tashkent TV Tower GLB Loader (models/tashkent.glb or live local upload!)
+  // ============================================================================
+  // Dynamic GLB Loaders: tashkent.glb & registon_opt.glb
+  // ============================================================================
   async function loadTashkentGlbUrl(url: string, name = 'tashkent.glb'): Promise<boolean> {
     try {
       const resource = await loadContainerUrl(app, url, name);
       const wrapper = new pc.Entity('TashkentTower_CustomGLB');
-      const ent = resource.instantiateRenderEntity({
-        castShadows: true,
-        receiveShadows: true,
-      });
+      const ent = resource.instantiateRenderEntity({ castShadows: true, receiveShadows: true });
       wrapper.addChild(ent);
       tashkentHolder.addChild(wrapper);
 
       const bounds = computeEntityBounds(wrapper);
       if (bounds) {
         const h = Math.max(0.2, bounds.halfExtents.y * 2);
-        const targetHeight = 84.0;
-        const sc = targetHeight / h;
+        const sc = 86.0 / h;
         ent.setLocalScale(sc, sc, sc);
 
         const scaled = computeEntityBounds(wrapper);
@@ -695,7 +1128,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
         }
       }
 
-      tuneWorldEntityShadows(wrapper, true, true);
+      tuneWorldEntityMaterials(wrapper, true, true);
       activeTashkentModel.destroy();
       activeTashkentModel = wrapper;
       customTashkentLoaded = true;
@@ -715,7 +1148,86 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     }
   }
 
-  // 6. Real Campus GLB Environment Loader (Replaces ALL simple boxes with real Mountain View campus!)
+  async function loadRegistonGlbUrl(url: string, name = 'registon_opt.glb'): Promise<boolean> {
+    try {
+      const resource = await loadContainerUrl(app, url, name);
+      const wrapper = new pc.Entity('Registon_CustomGLB');
+      const ent = resource.instantiateRenderEntity({ castShadows: true, receiveShadows: true });
+      wrapper.addChild(ent);
+      registonHolder.addChild(wrapper);
+
+      const bounds = computeEntityBounds(wrapper);
+      if (bounds) {
+        const maxSpan = Math.max(0.5, bounds.halfExtents.x * 2, bounds.halfExtents.z * 2);
+        // Scale grandly to 102m wide (~20% of active map footprint!)
+        const sc = 102.0 / maxSpan;
+        ent.setLocalScale(sc, sc, sc);
+
+        const scaled = computeEntityBounds(wrapper);
+        if (scaled) {
+          const minY = scaled.center.y - scaled.halfExtents.y;
+          const holderPos = registonHolder.getPosition();
+          ent.setLocalPosition(
+            holderPos.x - scaled.center.x,
+            holderPos.y - minY,
+            holderPos.z - scaled.center.z
+          );
+        }
+      }
+
+      tuneWorldEntityMaterials(wrapper, true, true);
+      activeRegistonModel.destroy();
+      activeRegistonModel = wrapper;
+      customRegistonLoaded = true;
+      return true;
+    } catch (err) {
+      console.warn('[World] Failed to load registon_opt.glb:', err);
+      return false;
+    }
+  }
+
+  async function loadRegistonGlbFile(file: File): Promise<boolean> {
+    const blobUrl = URL.createObjectURL(file);
+    try {
+      return await loadRegistonGlbUrl(blobUrl, file.name);
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 6000);
+    }
+  }
+
+  function registerTrafficCar(
+    entity: pc.Entity,
+    wheels: Array<{ spinPivot: pc.Entity; radius: number }>,
+    routeIndex: number,
+    phase: number,
+    speed: number
+  ): void {
+    const route = TRAFFIC_ROUTES[routeIndex % TRAFFIC_ROUTES.length];
+    const segLengths: number[] = [];
+    let totalLen = 0;
+    for (let i = 0; i < route.length; i++) {
+      const a = route[i];
+      const b = route[(i + 1) % route.length];
+      const l = Math.hypot(b.x - a.x, b.z - a.z);
+      segLengths.push(l);
+      totalLen += l;
+    }
+    root.addChild(entity);
+    trafficAgents.push({
+      entity,
+      wheels,
+      speed,
+      phase: ((phase % 1) + 1) % 1,
+      route,
+      segLengths,
+      totalLen,
+      spinDeg: 0,
+      x: route[0].x,
+      z: route[0].z,
+    });
+  }
+
+  // 6. Real Campus GLB Environment Loader
   const campusGlbRoot = new pc.Entity('CampusRealGlbRoot');
   root.addChild(campusGlbRoot);
 
@@ -737,13 +1249,27 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     clone.setLocalPosition(x, y, z);
     clone.setLocalEulerAngles(0, yawDeg, 0);
     clone.setLocalScale(scaleX, scaleY, scaleZ);
-    tuneWorldEntityShadows(clone, castShadows, true);
+    tuneWorldEntityMaterials(clone, castShadows, true);
     campusGlbRoot.addChild(clone);
     return clone;
   }
 
+  function registerSwayingNode(node: pc.Entity, ampDeg: number, speed: number): void {
+    const e = node.getLocalEulerAngles();
+    swayingFoliage.push({
+      node,
+      baseX: e.x,
+      baseY: e.y,
+      baseZ: e.z,
+      phase: swayingFoliage.length * 0.73,
+      ampDeg,
+      speed,
+    });
+  }
+
   async function loadCampusAssets(
     tashkentUrl?: string | null,
+    registonUrl?: string | null,
     onProgress?: (label: string, pct: number) => void
   ): Promise<void> {
     const safeLoad = async (path: string, label: string): Promise<pc.Entity | null> => {
@@ -756,10 +1282,10 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       }
     };
 
-    // Load custom tashkent.glb in parallel if present in models/
     const tashkentPromise = tashkentUrl ? loadTashkentGlbUrl(tashkentUrl, 'tashkent.glb') : Promise.resolve(false);
+    const registonPromise = registonUrl ? loadRegistonGlbUrl(registonUrl, 'registon_opt.glb') : Promise.resolve(false);
 
-    onProgress?.('Loading Gradient Canopy & Campus Buildings…', 18);
+    onProgress?.('Loading Campus, Mountains & Registon Square…', 18);
     const [
       canopyScene,
       horizonScene,
@@ -782,25 +1308,36 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       safeLoad('./assets/glb/campus_environment_v3.glb', 'campus_environment_v3'),
     ]);
 
-    await tashkentPromise;
-    onProgress?.('Assembling Mountain View Campus…', 52);
+    await Promise.all([tashkentPromise, registonPromise]);
+    onProgress?.('Assembling Buildings, Swaying Trees & River…', 52);
 
-    // A. Gradient Canopy V6 + Bay View Canopies + Campus Office Pavilions V6
+    const measureProto = (scene: pc.Entity | null, re: RegExp) => {
+      if (!scene) return null;
+      const proto = findChildByPattern(scene, re);
+      if (!proto) return null;
+      const temp = new pc.Entity('MeasureTemp');
+      temp.addChild(proto.clone());
+      app.root.addChild(temp);
+      const b = computeEntityBounds(temp);
+      app.root.removeChild(temp);
+      temp.destroy();
+      return {
+        scene,
+        re,
+        w: b ? Math.max(4, b.halfExtents.x * 2) : 32,
+        h: b ? Math.max(4, b.halfExtents.y * 2) : 13,
+        d: b ? Math.max(4, b.halfExtents.z * 2) : 20,
+      };
+    };
+
+    const pavV6 = measureProto(canopyScene, /^Campus_Office_Pavilion_V6$/i);
+    const pavV5 = measureProto(horizonScene, /^Campus_Office_Pavilion_V5$/i);
+    const glassV3 = measureProto(envV3Scene, /^Bldg_ModernGlass_Wing_V3$/i);
+
+    // A. Gradient Canopy V6 + Bay View Waterfront Pavilions
     if (canopyScene) {
-      const grad = cloneExtractedNode(
-        canopyScene,
-        /^Gradient_Canopy_Building_V6$/i,
-        0,
-        0,
-        145,
-        180,
-        1,
-        1,
-        1,
-        true
-      );
+      const grad = cloneExtractedNode(canopyScene, /^Gradient_Canopy_Building_V6$/i, 0, 0, 145, 180, 1, 1, 1, true);
       if (grad) {
-        // Collect pinwheel rotors for gentle wind spin
         const collectRotors = (n: pc.GraphNode) => {
           if (n instanceof pc.Entity && /Pinwheel.*Rotor|Rotor/i.test(n.name || '')) {
             pinwheelRotors.push(n);
@@ -810,60 +1347,74 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
         collectRotors(grad);
       }
 
-      // Bay View Dragonscale Waterfront Pavilions
       cloneExtractedNode(canopyScene, /^Bay_View_Canopy_Pavilion_V6$/i, 202, 0.02, 38, -90, 1.0, 1.0, 1.0, !isMobile);
       cloneExtractedNode(canopyScene, /^Bay_View_Canopy_Pavilion_V6$/i, 205, 0.02, -20, -90, 0.84, 0.84, 0.84, !isMobile);
-
-      // Authentic Limestone + Glass Campus Office Pavilions across all 8 campus blocks!
-      const officeProto = findChildByPattern(canopyScene, /^Campus_Office_Pavilion_V6$/i);
-      if (officeProto) {
-        const tempHolder = new pc.Entity('TempOfficeMeasure');
-        tempHolder.addChild(officeProto.clone());
-        app.root.addChild(tempHolder);
-        const ob = computeEntityBounds(tempHolder);
-        app.root.removeChild(tempHolder);
-        tempHolder.destroy();
-
-        const baseW = ob ? Math.max(4, ob.halfExtents.x * 2) : 28;
-        const baseD = ob ? Math.max(4, ob.halfExtents.z * 2) : 18;
-
-        for (const spec of officeSpecs) {
-          const sx = spec.wx / baseW;
-          const sz = spec.wz / baseD;
-          const sy = Math.min(1.25, Math.max(0.85, (sx + sz) * 0.5));
-          cloneExtractedNode(
-            canopyScene,
-            /^Campus_Office_Pavilion_V6$/i,
-            spec.cx,
-            0,
-            spec.cz,
-            spec.yaw,
-            sx,
-            sy,
-            sz,
-            !isMobile
-          );
-        }
-      }
-      canopyScene.destroy();
     }
 
-    // B. Santa Cruz Mountains Horizon Ridgeline & Landscaped Berms
+    // B. Campus Architectural Office Buildings (all white emissive glitches fixed!)
+    for (const spec of campusBuildings) {
+      const tpl =
+        spec.variant === 'glass_v3'
+          ? glassV3 || pavV6 || pavV5
+          : spec.variant === 'pavilion_v5'
+            ? pavV5 || pavV6 || glassV3
+            : pavV6 || pavV5 || glassV3;
+      if (!tpl) continue;
+      const sx = spec.wx / tpl.w;
+      const sz = spec.wz / tpl.d;
+      const sy = Math.max(0.85, Math.min(1.4, spec.hy / tpl.h));
+      cloneExtractedNode(tpl.scene, tpl.re, spec.cx, 0, spec.cz, spec.yaw, sx, sy, sz, !isMobile);
+    }
+
+    // C. 360° Two-Tier Santa Cruz & Diablo Mountain Skyline (behind Registon Square & Campus!)
     if (horizonScene) {
-      for (const yaw of [0, 90, 180, 270]) {
-        cloneExtractedNode(
-          horizonScene,
-          /^Santa_Cruz_Ridgeline_Arc_V5$/i,
-          0,
-          -1.5,
-          0,
-          yaw,
-          1.05,
-          1.0,
-          1.05,
-          false
-        );
+      const mountainMatTier1 = new pc.StandardMaterial();
+      mountainMatTier1.diffuse.set(0.32, 0.44, 0.30);
+      mountainMatTier1.useMetalness = true;
+      mountainMatTier1.metalness = 0.0;
+      mountainMatTier1.gloss = 0.08;
+      mountainMatTier1.update();
+
+      const mountainMatTier2 = new pc.StandardMaterial();
+      mountainMatTier2.diffuse.set(0.38, 0.48, 0.56);
+      mountainMatTier2.useMetalness = true;
+      mountainMatTier2.metalness = 0.0;
+      mountainMatTier2.gloss = 0.06;
+      mountainMatTier2.update();
+
+      const applyMountainMat = (ent: pc.Entity, mat: pc.StandardMaterial) => {
+        const comps = ent.findComponents('render') as pc.RenderComponent[];
+        for (const rc of comps) {
+          rc.castShadows = false;
+          rc.receiveShadows = false;
+          for (const mi of rc.meshInstances) mi.material = mat;
+        }
+      };
+
+      for (let i = 0; i < 12; i++) {
+        const azDeg = i * 30;
+        const rad = (azDeg * Math.PI) / 180;
+        const r = 284 + (i % 3) * 3;
+        const mx = Math.sin(rad) * r;
+        const mz = Math.cos(rad) * r;
+        const yawDeg = (Math.atan2(-mx, -mz) * 180) / Math.PI;
+        const sy = 1.82 + (i % 4) * 0.08;
+        const seg = cloneExtractedNode(horizonScene, /^Santa_Cruz_Ridgeline_Arc_V5$/i, mx, -0.6, mz, yawDeg, 2.68, sy, 1.74, false);
+        if (seg) applyMountainMat(seg, mountainMatTier1);
       }
+
+      for (let i = 0; i < 12; i++) {
+        const azDeg = i * 30 + 15;
+        const rad = (azDeg * Math.PI) / 180;
+        const r = 386 + (i % 3) * 5;
+        const mx = Math.sin(rad) * r;
+        const mz = Math.cos(rad) * r;
+        const yawDeg = (Math.atan2(-mx, -mz) * 180) / Math.PI;
+        const sy = 2.75 + (i % 4) * 0.14;
+        const seg = cloneExtractedNode(horizonScene, /^Santa_Cruz_Ridgeline_Arc_V5$/i, mx, -1.2, mz, yawDeg, 3.8, sy, 2.56, false);
+        if (seg) applyMountainMat(seg, mountainMatTier2);
+      }
+
       const bermSpots = [
         [-42, 92, 20, 1.1],
         [44, 92, -25, 1.1],
@@ -878,100 +1429,192 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       horizonScene.destroy();
     }
 
-    // C. Shoreline Amphitheatre Tensile Bowl & Monument Sign
+    if (canopyScene) canopyScene.destroy();
+
+    // D. Shoreline Amphitheatre Tensile Bowl & Monument Sign
     if (landmarksScene) {
       cloneExtractedNode(landmarksScene, /^Shoreline_Tensile_Bowl_V2$/i, 12, 0.2, -208, 0, 1.12, 1.12, 1.12, !isMobile);
       cloneExtractedNode(landmarksScene, /^Shoreline_Monument_Sign_V2$/i, 3.6, 0.04, -179.8, 16, 0.76, 0.76, 0.76, false);
       landmarksScene.destroy();
     }
 
-    // D. Stevens Creek Arched Bridge, Jump Ramps, Cafe Umbrellas, Snack Carts, Planters & Boulders
+    // E. Stevens Creek Bridge (over the river!), Jump Ramps, Cafes & SWAYING ORNAMENTAL GRASS PLUMES!
     if (propsScene) {
       const bridgeYaw = (Math.atan2(34.0, 72.0) * 180) / Math.PI;
-      cloneExtractedNode(propsScene, /^Stevens_Creek_Bridge_V6$/i, 35.0, -0.25, -122.0, bridgeYaw, 1, 1, 1, !isMobile);
-
-      // Physical Jump Ramps matching ramps[]
+      cloneExtractedNode(propsScene, /^Stevens_Creek_Bridge_V6$/i, 35.0, -0.15, -122.0, bridgeYaw, 1, 1, 1, !isMobile);
       cloneExtractedNode(propsScene, /^Campus_Jump_Ramp_V6$/i, -92.0, 0.02, 76.0, -90, 1, 1, 1, !isMobile);
       cloneExtractedNode(propsScene, /^Campus_Jump_Ramp_V6$/i, 156.0, 0.02, 32.0, 0, 1.12, 1.15, 1.12, !isMobile);
       cloneExtractedNode(propsScene, /^Campus_Landing_Ramp_V8$/i, 156.0, 0.02, 14.3, 0, 1.05, 1.05, 1.05, false);
 
-      // Cafe Umbrellas & Snack Carts around Tashkent Plaza, Gradient Canopy & Bay View
       const cafeSpots = [
-        [-17, 46, 20],
-        [17, 46, -20],
-        [-17, 12, 45],
-        [17, 12, -45],
         [-18, 118, 15],
         [18, 118, -15],
         [146, 52, 90],
         [146, 6, 90],
         [-106, -38, 30],
+        [-106, 86, -40],
       ];
       for (const [cx, cz, cyaw] of cafeSpots) {
         cloneExtractedNode(propsScene, /^Campus_Umbrella_Cafe_Set_V6$/i, cx, 0.04, cz, cyaw, 1, 1, 1, false);
       }
-      cloneExtractedNode(propsScene, /^Campus_Snack_Cart_V6$/i, -19, 0.04, 58, 40, 1, 1, 1, false);
+      cloneExtractedNode(propsScene, /^Campus_Snack_Cart_V6$/i, -26, 0.04, 62, 40, 1, 1, 1, false);
       cloneExtractedNode(propsScene, /^Campus_Snack_Cart_V6$/i, 146, 0.04, 62, -90, 1, 1, 1, false);
 
-      // Decorative Planters & Shrubs around the Tashkent Central Plaza ring
-      for (let i = 0; i < 8; i++) {
-        const a = (i * Math.PI) / 4 + Math.PI / 8;
-        const px = TASHKENT_CENTER.x + Math.sin(a) * 16.5;
-        const pz = TASHKENT_CENTER.z + Math.cos(a) * 16.5;
-        cloneExtractedNode(propsScene, /^Campus_Planter_Box_V6$/i, px, 0.05, pz, (a * 180) / Math.PI, 0.9, 0.9, 0.9, false);
+      // RESTORED SWAYING CAMPUS GRASS PLUMES & COASTAL SHRUBS along roadsides, riverbanks & plazas!
+      const grassPlumeSpots: Array<[number, number, number, number]> = [
+        [-12, 54, 15, 1.35],
+        [12, 54, 110, 1.35],
+        [-18, 44, 40, 1.4],
+        [18, 44, 160, 1.4],
+        [-28, 66, 20, 1.3],
+        [28, 66, 80, 1.3],
+        [-50, 66, 140, 1.45],
+        [50, 66, 210, 1.45],
+        [-74, 66, 55, 1.35],
+        [74, 66, 175, 1.35],
+        [-22, 86, 90, 1.4],
+        [22, 86, 260, 1.4],
+        [-68, 86, 30, 1.35],
+        [68, 86, 150, 1.35],
+        [-14, 108, 70, 1.3],
+        [14, 108, 220, 1.3],
+        [-30, -8, 15, 1.4],
+        [30, -8, 125, 1.4],
+        [-64, -8, 45, 1.35],
+        [64, -8, 195, 1.35],
+        // Riverbanks around Stevens Creek Bridge
+        [14, -104, 25, 1.55],
+        [26, -102, 85, 1.5],
+        [54, -108, 145, 1.55],
+        [68, -118, 210, 1.6],
+        [10, -134, 40, 1.5],
+        [48, -142, 160, 1.55],
+        [88, -134, 95, 1.5],
+        [122, -138, 200, 1.6],
+        [-14, -116, 60, 1.5],
+        // Bay View Waterfront shore grass
+        [164, 58, 10, 1.5],
+        [164, 34, 120, 1.5],
+        [164, 8, 210, 1.5],
+        [164, -22, 75, 1.5],
+        [164, -52, 170, 1.5],
+        // Registon Square approach gardens
+        [-94, -92, 30, 1.45],
+        [-104, -90, 110, 1.45],
+        [-114, -90, 210, 1.45],
+        [-92, -116, 45, 1.45],
+        [-132, -88, 155, 1.45],
+      ];
+
+      for (let i = 0; i < grassPlumeSpots.length; i++) {
+        const [gx, gz, gyaw, gs] = grassPlumeSpots[i];
+        const pat = i % 3 === 0 ? /^Shrub_Coastal_Cluster_V6$/i : /^Ornamental_Grass_Plume_V6$/i;
+        const gEnt = cloneExtractedNode(propsScene, pat, gx, 0.02, gz, gyaw, gs, gs, gs, false);
+        if (gEnt) {
+          registerSwayingNode(gEnt, i % 3 === 0 ? 1.8 : 4.2, 1.6 + (i % 5) * 0.22);
+        }
       }
+
       propsScene.destroy();
     }
 
-    // E. Real Botanical Coast Live Oaks & Coast Redwoods (ZERO cone/sphere trees!)
+    // F. LUSH BOTANICAL FOREST: 78 Real Coast Live Oaks & Coast Redwoods WITH GENTLY SWAYING LEAVES!
     if (treesScene) {
       const treePlacements: Array<{ type: 'oak' | 'redwood'; x: number; z: number; s: number; yaw: number }> = [
-        // Surrounding Tashkent Plaza & N Shoreline Blvd
         { type: 'oak', x: -24, z: 62, s: 1.05, yaw: 15 },
-        { type: 'oak', x: 24, z: 62, s: 1.0, yaw: 110 },
-        { type: 'redwood', x: -34, z: 32, s: 1.05, yaw: 40 },
-        { type: 'redwood', x: 34, z: 32, s: 1.1, yaw: 160 },
-        { type: 'oak', x: -26, z: -2, s: 1.0, yaw: 200 },
-        { type: 'oak', x: 26, z: -2, s: 1.08, yaw: 75 },
-        // Charleston Rd boulevard trees
-        { type: 'oak', x: -45, z: 88, s: 1.0, yaw: 20 },
-        { type: 'oak', x: -82, z: 88, s: 1.12, yaw: 90 },
-        { type: 'redwood', x: 45, z: 88, s: 1.0, yaw: 30 },
-        { type: 'oak', x: 92, z: 88, s: 1.05, yaw: 140 },
-        { type: 'oak', x: 132, z: 88, s: 1.0, yaw: 250 },
-        // Gradient Canopy flank
-        { type: 'redwood', x: -46, z: 128, s: 1.15, yaw: 12 },
-        { type: 'redwood', x: 46, z: 128, s: 1.15, yaw: 88 },
-        { type: 'oak', x: -32, z: 104, s: 0.95, yaw: 195 },
-        { type: 'oak', x: 32, z: 104, s: 0.95, yaw: 60 },
-        // Android Lawn & Stan T-Rex Park
+        { type: 'oak', x: 24, z: 62, s: 1.02, yaw: 110 },
+        { type: 'redwood', x: -34, z: 32, s: 1.12, yaw: 40 },
+        { type: 'redwood', x: 34, z: 32, s: 1.15, yaw: 160 },
+        { type: 'oak', x: -34, z: 16, s: 1.0, yaw: 20 },
+        { type: 'oak', x: 34, z: 16, s: 1.05, yaw: 135 },
+        { type: 'oak', x: -24, z: -2, s: 1.02, yaw: 200 },
+        { type: 'oak', x: 24, z: -2, s: 1.08, yaw: 75 },
+        { type: 'redwood', x: -16, z: 96, s: 1.05, yaw: 15 },
+        { type: 'redwood', x: 16, z: 96, s: 1.08, yaw: 140 },
+        { type: 'oak', x: -36, z: 86, s: 1.05, yaw: 20 },
+        { type: 'oak', x: -58, z: 86, s: 1.0, yaw: 120 },
+        { type: 'oak', x: -84, z: 86, s: 1.12, yaw: 90 },
+        { type: 'redwood', x: -102, z: 86, s: 1.08, yaw: 40 },
+        { type: 'oak', x: -144, z: 86, s: 1.06, yaw: 185 },
+        { type: 'redwood', x: -176, z: 86, s: 1.15, yaw: 50 },
+        { type: 'redwood', x: 36, z: 86, s: 1.06, yaw: 30 },
+        { type: 'oak', x: 58, z: 86, s: 1.05, yaw: 140 },
+        { type: 'oak', x: 86, z: 86, s: 1.1, yaw: 220 },
+        { type: 'redwood', x: 112, z: 86, s: 1.12, yaw: 60 },
+        { type: 'oak', x: 136, z: 86, s: 1.04, yaw: 250 },
+        { type: 'oak', x: -36, z: 65, s: 1.0, yaw: 75 },
+        { type: 'oak', x: -96, z: 65, s: 1.06, yaw: 195 },
+        { type: 'oak', x: 36, z: 65, s: 1.04, yaw: 310 },
+        { type: 'oak', x: 112, z: 65, s: 1.02, yaw: 45 },
+        { type: 'redwood', x: 136, z: 65, s: 1.1, yaw: 165 },
+        { type: 'redwood', x: -46, z: 128, s: 1.18, yaw: 12 },
+        { type: 'redwood', x: 46, z: 128, s: 1.18, yaw: 88 },
+        { type: 'redwood', x: -58, z: 144, s: 1.22, yaw: 140 },
+        { type: 'redwood', x: 58, z: 144, s: 1.2, yaw: 220 },
+        { type: 'oak', x: -32, z: 104, s: 1.0, yaw: 195 },
+        { type: 'oak', x: 32, z: 104, s: 1.0, yaw: 60 },
+        { type: 'oak', x: -138, z: 126, s: 1.12, yaw: 35 },
+        { type: 'redwood', x: 148, z: 118, s: 1.15, yaw: 175 },
         { type: 'oak', x: -138, z: 106, s: 1.1, yaw: 45 },
-        { type: 'redwood', x: -100, z: 106, s: 1.05, yaw: 130 },
+        { type: 'redwood', x: -100, z: 106, s: 1.08, yaw: 130 },
+        { type: 'oak', x: -138, z: 64, s: 1.06, yaw: 215 },
+        { type: 'redwood', x: -138, z: 36, s: 1.14, yaw: 85 },
+        { type: 'oak', x: -138, z: 6, s: 1.04, yaw: 310 },
+        { type: 'oak', x: -102, z: 36, s: 1.08, yaw: 15 },
+        { type: 'oak', x: -102, z: 6, s: 1.02, yaw: 190 },
+        { type: 'redwood', x: -186, z: 54, s: 1.2, yaw: 42 },
+        { type: 'redwood', x: -186, z: -2, s: 1.18, yaw: 132 },
         { type: 'oak', x: -136, z: -38, s: 1.08, yaw: 210 },
         { type: 'redwood', x: -98, z: -66, s: 1.12, yaw: 300 },
-        // Amphitheatre Pkwy & North Shoreline
-        { type: 'oak', x: -56, z: -32, s: 1.0, yaw: 70 },
-        { type: 'redwood', x: 38, z: -34, s: 1.1, yaw: 145 },
-        { type: 'oak', x: 96, z: -34, s: 1.05, yaw: 260 },
-        { type: 'redwood', x: 138, z: -56, s: 1.12, yaw: 30 },
-        { type: 'oak', x: -18, z: -68, s: 1.02, yaw: 170 },
-        { type: 'oak', x: 24, z: -72, s: 1.04, yaw: 50 },
-        // Bay View Promenade & Shoreline Meadow
-        { type: 'oak', x: 138, z: 62, s: 1.0, yaw: 90 },
-        { type: 'oak', x: 138, z: 10, s: 1.05, yaw: 220 },
-        { type: 'redwood', x: -10, z: -150, s: 1.15, yaw: 15 },
-        { type: 'redwood', x: 42, z: -162, s: 1.1, yaw: 105 },
+        { type: 'oak', x: -138, z: -74, s: 1.06, yaw: 65 },
+        { type: 'oak', x: -52, z: -76, s: 1.08, yaw: 25 },
+        { type: 'oak', x: -56, z: -30, s: 1.04, yaw: 70 },
+        { type: 'oak', x: -94, z: -30, s: 1.06, yaw: 155 },
+        { type: 'redwood', x: -24, z: -32, s: 1.12, yaw: 245 },
+        { type: 'redwood', x: 34, z: -32, s: 1.14, yaw: 145 },
+        { type: 'oak', x: 96, z: -32, s: 1.06, yaw: 260 },
+        { type: 'oak', x: 132, z: -32, s: 1.05, yaw: 110 },
+        { type: 'oak', x: -38, z: -6, s: 1.02, yaw: 45 },
+        { type: 'oak', x: 38, z: -6, s: 1.05, yaw: 215 },
+        { type: 'oak', x: 116, z: -6, s: 1.04, yaw: 330 },
+        { type: 'oak', x: -18, z: -68, s: 1.04, yaw: 170 },
+        { type: 'oak', x: 24, z: -72, s: 1.06, yaw: 50 },
+        { type: 'redwood', x: -18, z: -98, s: 1.14, yaw: 95 },
+        { type: 'redwood', x: 18, z: -98, s: 1.16, yaw: 210 },
+        { type: 'oak', x: 64, z: -98, s: 1.08, yaw: 35 },
+        { type: 'redwood', x: 138, z: -56, s: 1.14, yaw: 30 },
+        { type: 'redwood', x: 142, z: -102, s: 1.18, yaw: 145 },
+        { type: 'oak', x: 138, z: 42, s: 1.04, yaw: 90 },
+        { type: 'oak', x: 138, z: 12, s: 1.08, yaw: 220 },
+        { type: 'redwood', x: 174, z: 86, s: 1.15, yaw: 65 },
+        { type: 'redwood', x: 174, z: -68, s: 1.18, yaw: 195 },
+        { type: 'redwood', x: -12, z: -158, s: 1.18, yaw: 15 },
+        { type: 'redwood', x: 44, z: -162, s: 1.14, yaw: 105 },
+        { type: 'oak', x: -24, z: -178, s: 1.12, yaw: 240 },
+        { type: 'oak', x: 48, z: -184, s: 1.1, yaw: 75 },
+        { type: 'redwood', x: 76, z: -152, s: 1.16, yaw: 120 },
+        { type: 'oak', x: -162, z: 142, s: 1.15, yaw: 88 },
+        { type: 'redwood', x: 154, z: 152, s: 1.2, yaw: 190 },
+        { type: 'oak', x: -94, z: -122, s: 1.1, yaw: 55 },
+        { type: 'redwood', x: -92, z: -162, s: 1.18, yaw: 270 },
       ];
-      const maxTrees = isMobile ? 20 : treePlacements.length;
-      for (let i = 0; i < maxTrees; i++) {
-        const t = treePlacements[i];
+      for (const t of treePlacements) {
         const pat = t.type === 'redwood' ? /^Tree_CoastRedwood_V4$/i : /^Tree_CoastLiveOak_V4$/i;
-        cloneExtractedNode(treesScene, pat, t.x, 0, t.z, t.yaw, t.s, t.s, t.s, false);
+        const treeEnt = cloneExtractedNode(treesScene, pat, t.x, 0, t.z, t.yaw, t.s, t.s, t.s, false);
+        if (treeEnt) {
+          // Gently sway ONLY the foliage crowns in the wind (trunk stays rooted!)
+          const crown = findChildByPattern(treeEnt, /FoliageCrown/i);
+          if (crown) {
+            registerSwayingNode(crown, t.type === 'redwood' ? 1.55 : 2.15, 1.05 + (swayingFoliage.length % 5) * 0.14);
+          } else {
+            registerSwayingNode(treeEnt, 1.35, 1.1);
+          }
+        }
       }
       treesScene.destroy();
     }
 
-    // F. Android Lawn Sculptures (Bugdroid + 6 Dessert Statues)
+    // G. Android Lawn Sculptures
     if (androidScene) {
       cloneExtractedNode(androidScene, /^Bugdroid_V2$/i, -118, 0.05, 96, 0, 1.22, 1.22, 1.22, !isMobile);
       const desserts = [
@@ -988,14 +1631,14 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       androidScene.destroy();
     }
 
-    // G. Bronze Stan T-Rex Statue at Googleplex Courtyard
+    // H. Bronze Stan T-Rex Statue
     if (stanScene) {
       cloneExtractedNode(stanScene, /^Stan_Plinth_V5$/i, -118, 0.04, -50, 0, 1, 1, 1, false);
       cloneExtractedNode(stanScene, /^Stan_Body_V5$/i, -118, 0.48, -50, 18, 1, 1, 1, !isMobile);
       stanScene.destroy();
     }
 
-    // H. Modern Campus Street Lamps along main boulevards
+    // I. Modern Street Lamps along Boulevards
     if (envV3Scene) {
       const lampSpots = [
         [-10, 96, 90],
@@ -1010,6 +1653,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
         [38, -9, 180],
         [146, 36, 90],
         [146, -42, 90],
+        [-106, -86, 0],
       ];
       for (const [lx, lz, lyaw] of lampSpots) {
         cloneExtractedNode(envV3Scene, /^Street_Lamp_Modern_V3$/i, lx, 0, lz, lyaw, 1, 1, 1, false);
@@ -1017,40 +1661,25 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       envV3Scene.destroy();
     }
 
-    // I. Live Autonomous Waymo Gen6 Traffic Cruisers (3 cars looping campus boulevards!)
+    // J. Keep 1 subtle Waymo cruiser on outer loop while user's own .glb cars dominate the roads!
     if (waymoScene) {
-      const routeA = [
-        { x: -114, z: 79.5 },
-        { x: 152, z: 79.5 },
-        { x: 152, z: -21.5 },
-        { x: -114, z: -21.5 },
-      ];
-      const spawnWaymo = (phase: number, speed: number) => {
-        const wEnt = cloneExtractedNode(waymoScene, /^Waymo_Gen6_V4$/i, 0, 0.04, 0, 0, 1, 1, 1, !isMobile);
-        if (!wEnt) return;
-        const segLengths: number[] = [];
-        let totalLen = 0;
-        for (let i = 0; i < routeA.length; i++) {
-          const a = routeA[i];
-          const b = routeA[(i + 1) % routeA.length];
-          const l = Math.hypot(b.x - a.x, b.z - a.z);
-          segLengths.push(l);
-          totalLen += l;
-        }
-        waymoAgents.push({ entity: wEnt, speed, phase, route: routeA, segLengths, totalLen });
-      };
-      spawnWaymo(0.08, 9.2);
-      spawnWaymo(0.42, 8.6);
-      if (!isMobile) spawnWaymo(0.75, 9.0);
+      const proto = findChildByPattern(waymoScene, /^Waymo_Gen6_V4$/i);
+      if (proto) {
+        const wClone = proto.clone() as pc.Entity;
+        tuneWorldEntityMaterials(wClone, !isMobile, true);
+        const holder = new pc.Entity('Traffic_Waymo');
+        wClone.setLocalEulerAngles(0, 180, 0);
+        holder.addChild(wClone);
+        registerTrafficCar(holder, [], 0, 0.62, 8.8);
+      }
       waymoScene.destroy();
     }
   }
 
-  // 7. Terrain + Jump Ramp + Arched Bridge Height Query
   function getTerrainHeight(x: number, z: number): number {
     let h = 0.04;
 
-    // Stevens Creek Arched Bridge corridor: (52, -86) -> (18, -158)
+    // Stevens Creek Arched Bridge deck spanning over the flowing river!
     const bx1 = 52;
     const bz1 = -86;
     const bx2 = 18;
@@ -1062,12 +1691,11 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     if (bt >= 0 && bt <= 1) {
       const px = bx1 + bdx * bt;
       const pz = bz1 + bdz * bt;
-      if (Math.hypot(x - px, z - pz) < 4.5) {
-        h = Math.max(h, 0.04 + Math.sin(bt * Math.PI) * 1.18);
+      if (Math.hypot(x - px, z - pz) < 4.8) {
+        h = Math.max(h, 0.04 + Math.sin(bt * Math.PI) * 1.45);
       }
     }
 
-    // Physical Stunt Jump Ramps
     for (let i = 0; i < ramps.length; i++) {
       const r = ramps[i];
       const rad = (r.yawDeg * Math.PI) / 180;
@@ -1090,59 +1718,96 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     return h;
   }
 
+  /** Spatial 0..1 proximity to Bay View Lake or Stevens Creek River for authentic water audio */
+  function getWaterProximity(x: number, z: number): number {
+    // Distance to Bay View Lake box [159..237, -69..97]
+    const dxBay = Math.max(159 - x, 0, x - 237);
+    const dzBay = Math.max(-69 - z, 0, z - 97);
+    const dBay = Math.hypot(dxBay, dzBay);
+
+    // Distance to Stevens Creek River bridge segment (-28,-104) -> (138,-148)
+    const sx = 138 - -28;
+    const sz = -148 - -104;
+    const t = Math.max(0, Math.min(1, ((x - -28) * sx + (z - -104) * sz) / (sx * sx + sz * sz)));
+    const rx = -28 + sx * t;
+    const rz = -104 + sz * t;
+    const dRiver = Math.max(0, Math.hypot(x - rx, z - rz) - 12);
+
+    const dMin = Math.min(dBay, dRiver);
+    return Math.max(0, Math.min(1, 1 - dMin / 58));
+  }
+
+  /** Spatial 0..1 proximity to closest moving AI traffic car for passing-car ambience */
+  function getNearestTrafficProximity(x: number, z: number): number {
+    let minD = 999;
+    for (let i = 0; i < trafficAgents.length; i++) {
+      const a = trafficAgents[i];
+      const d = Math.hypot(x - a.x, z - a.z);
+      if (d < minD) minD = d;
+    }
+    return Math.max(0, Math.min(1, 1 - minD / 36));
+  }
+
   function setTimeOfDay(mode: TimeOfDay, camera?: pc.CameraComponent | null): void {
     hdrEnv.apply(mode, camera);
   }
 
-  function update(dt: number, elapsedSec: number, playerPos: pc.Vec3): number {
-    // Gently spin Gradient Canopy origami pinwheels
+  function update(dt: number, elapsedSec: number, playerPos: pc.Vec3): void {
     for (let i = 0; i < pinwheelRotors.length; i++) {
       pinwheelRotors[i].rotateLocal(0, 0, dt * (58 + i * 14));
     }
 
-    // Move autonomous Waymo traffic smoothly along campus perimeter loop
-    for (let i = 0; i < waymoAgents.length; i++) {
-      const w = waymoAgents[i];
-      w.phase = (w.phase + (w.speed * dt) / w.totalLen) % 1;
-      let dist = w.phase * w.totalLen;
+    // Gently scroll shimmering water ripples along the river & lake!
+    for (let i = 0; i < animatedWaters.length; i++) {
+      const wm = animatedWaters[i];
+      wm.diffuseMapOffset.set(
+        (elapsedSec * (i === 0 ? 0.014 : 0.032)) % 1,
+        (elapsedSec * (i === 0 ? 0.018 : 0.095)) % 1
+      );
+      wm.update();
+    }
+
+    // Gently sway tree leaves & ornamental grass plumes in the California/Tashkent breeze!
+    for (let i = 0; i < swayingFoliage.length; i++) {
+      const s = swayingFoliage[i];
+      const w1 = Math.sin(elapsedSec * s.speed + s.phase) * s.ampDeg;
+      const w2 = Math.cos(elapsedSec * (s.speed * 0.72) + s.phase * 1.4) * (s.ampDeg * 0.65);
+      s.node.setLocalEulerAngles(s.baseX + w1, s.baseY, s.baseZ + w2);
+    }
+
+    // Drive ALL road traffic cars smoothly along boulevards!
+    for (let i = 0; i < trafficAgents.length; i++) {
+      const agent = trafficAgents[i];
+      const distPlayer = Math.hypot(playerPos.x - agent.x, playerPos.z - agent.z);
+      const speedMul = distPlayer < 7.5 ? 0.0 : distPlayer < 13.0 ? 0.35 : 1.0;
+      const curSpeed = agent.speed * speedMul;
+
+      agent.phase = (agent.phase + (curSpeed * dt) / agent.totalLen) % 1;
+      let dist = agent.phase * agent.totalLen;
       let segIdx = 0;
-      while (segIdx < w.segLengths.length - 1 && dist > w.segLengths[segIdx]) {
-        dist -= w.segLengths[segIdx];
+      while (segIdx < agent.segLengths.length - 1 && dist > agent.segLengths[segIdx]) {
+        dist -= agent.segLengths[segIdx];
         segIdx++;
       }
-      const a = w.route[segIdx];
-      const b = w.route[(segIdx + 1) % w.route.length];
-      const t = dist / Math.max(0.01, w.segLengths[segIdx]);
+      const a = agent.route[segIdx];
+      const b = agent.route[(segIdx + 1) % agent.route.length];
+      const t = dist / Math.max(0.01, agent.segLengths[segIdx]);
       const wx = a.x + (b.x - a.x) * t;
       const wz = a.z + (b.z - a.z) * t;
-      const yawDeg = (Math.atan2(b.x - a.x, b.z - a.z) * 180) / Math.PI;
-      w.entity.setLocalPosition(wx, 0.04, wz);
-      w.entity.setLocalEulerAngles(0, yawDeg, 0);
-    }
+      agent.x = wx;
+      agent.z = wz;
 
-    // Animate & check checkpoints
-    let newlyCollected = 0;
-    for (let i = 0; i < checkpoints.length; i++) {
-      const cp = checkpoints[i];
-      if (cp.collected) continue;
-      cp.ringMesh.setLocalEulerAngles(90, elapsedSec * 92 + i * 32, 0);
-      cp.entity.setLocalPosition(cp.x, cp.y + Math.sin(elapsedSec * 2.4 + i) * 0.16, cp.z);
+      const yawDeg = (Math.atan2(-(b.x - a.x), -(b.z - a.z)) * 180) / Math.PI;
+      agent.entity.setLocalPosition(wx, getTerrainHeight(wx, wz), wz);
+      agent.entity.setLocalEulerAngles(0, yawDeg, 0);
 
-      const dx = playerPos.x - cp.x;
-      const dz = playerPos.z - cp.z;
-      if (dx * dx + dz * dz < cp.radius * cp.radius) {
-        cp.collected = true;
-        cp.entity.enabled = false;
-        newlyCollected += 1;
+      if (agent.wheels.length > 0 && curSpeed > 0.05) {
+        const r = agent.wheels[0].radius || 0.35;
+        agent.spinDeg += ((curSpeed * dt) / Math.max(0.22, r)) * (180 / Math.PI);
+        for (let w = 0; w < agent.wheels.length; w++) {
+          agent.wheels[w].spinPivot.setLocalEulerAngles(-agent.spinDeg, 0, 0);
+        }
       }
-    }
-    return newlyCollected;
-  }
-
-  function resetCheckpoints(): void {
-    for (const cp of checkpoints) {
-      cp.collected = false;
-      cp.entity.enabled = true;
     }
   }
 
@@ -1151,16 +1816,21 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     hdrEnv,
     colliders,
     ramps,
-    checkpoints,
-    worldRadius: 235,
+    worldRadius: 245,
     tashkentCenter: TASHKENT_CENTER,
+    registonCenter: REGISTON_CENTER,
     getTerrainHeight,
+    getWaterProximity,
+    getNearestTrafficProximity,
     setTimeOfDay,
     update,
-    resetCheckpoints,
     loadCampusAssets,
     loadTashkentGlbUrl,
     loadTashkentGlbFile,
+    loadRegistonGlbUrl,
+    loadRegistonGlbFile,
     isCustomTashkentLoaded: () => customTashkentLoaded,
+    isCustomRegistonLoaded: () => customRegistonLoaded,
+    registerTrafficCar,
   };
 }
