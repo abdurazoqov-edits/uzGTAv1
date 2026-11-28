@@ -1,4 +1,5 @@
 import * as pc from 'playcanvas';
+import { CarDamageRig } from './damage';
 import { HdrEnvironmentController, TimeOfDay } from './hdrEnv';
 
 export type { TimeOfDay };
@@ -19,17 +20,38 @@ export interface StuntRamp {
   height: number;
 }
 
+export interface TrafficWheelRef {
+  steerPivot: pc.Entity;
+  spinPivot: pc.Entity;
+  isFront: boolean;
+  radius: number;
+}
+
 export interface TrafficAgent {
   entity: pc.Entity;
-  wheels: Array<{ spinPivot: pc.Entity; radius: number }>;
-  speed: number;
+  wheels: TrafficWheelRef[];
+  damageRig: CarDamageRig | null;
+  carWidth: number;
+  carLength: number;
+  baseSpeed: number;
+  curSpeed: number;
   phase: number;
   route: Array<{ x: number; z: number }>;
   segLengths: number[];
   totalLen: number;
   spinDeg: number;
+  steerDeg: number;
+  yaw: number;
   x: number;
   z: number;
+  // Physical crash displacement & recovery state
+  offsetX: number;
+  offsetZ: number;
+  knockVx: number;
+  knockVz: number;
+  knockYaw: number;
+  knockYawVel: number;
+  stunTimer: number;
 }
 
 interface SwayItem {
@@ -47,6 +69,7 @@ export interface OpenWorldHandle {
   hdrEnv: HdrEnvironmentController;
   colliders: WorldBoxCollider[];
   ramps: StuntRamp[];
+  trafficAgents: TrafficAgent[];
   worldRadius: number;
   tashkentCenter: { x: number; z: number };
   registonCenter: { x: number; z: number };
@@ -54,7 +77,20 @@ export interface OpenWorldHandle {
   getWaterProximity: (x: number, z: number) => number;
   getNearestTrafficProximity: (x: number, z: number) => number;
   setTimeOfDay: (mode: TimeOfDay, camera?: pc.CameraComponent | null) => void;
-  update: (dt: number, elapsedSec: number, playerPos: pc.Vec3) => void;
+  update: (
+    dt: number,
+    elapsedSec: number,
+    playerPos: pc.Vec3,
+    pedestrians?: Array<{ x: number; z: number }>
+  ) => void;
+  applyTrafficCrash: (
+    agent: TrafficAgent,
+    impulseVx: number,
+    impulseVz: number,
+    worldHitPoint: pc.Vec3,
+    worldHitDir: pc.Vec3,
+    intensity: number
+  ) => void;
   loadCampusAssets: (
     tashkentUrl?: string | null,
     registonUrl?: string | null,
@@ -68,10 +104,11 @@ export interface OpenWorldHandle {
   isCustomRegistonLoaded: () => boolean;
   registerTrafficCar: (
     entity: pc.Entity,
-    wheels: Array<{ spinPivot: pc.Entity; radius: number }>,
+    wheels: TrafficWheelRef[],
     routeIndex: number,
     phase: number,
-    speed: number
+    speed: number,
+    opts?: { damageRig?: CarDamageRig | null; carWidth?: number; carLength?: number }
   ) => void;
 }
 
@@ -655,21 +692,26 @@ function computeEntityBounds(root: pc.Entity): pc.BoundingBox | null {
   root.getWorldTransform();
   const comps = root.findComponents('render') as pc.RenderComponent[];
   let box: pc.BoundingBox | null = null;
+  const tmp = new pc.BoundingBox();
   for (const rc of comps) {
     if (!rc.enabled || !rc.entity.enabled) continue;
     for (const mi of rc.meshInstances) {
-      if (!mi.visible) continue;
-      if (!box) box = mi.aabb.clone();
-      else box.add(mi.aabb);
+      if (!mi.visible || !mi.mesh) continue;
+      // ALWAYS compute exact fresh world-space AABB directly from immutable local mesh AABB!
+      // Prevents stale PlayCanvas mi.aabb cache from tipping/mis-scaling newly rotated/scaled GLBs!
+      tmp.setFromTransformedAabb(mi.mesh.aabb, mi.node.getWorldTransform());
+      if (!box) box = tmp.clone();
+      else box.add(tmp);
     }
   }
   return box;
 }
 
 /**
- * Tunes shadow flags AND fixes pure-white blown-out GLB building materials!
- * (e.g. Mat_Pavilion_Arch_V5, Mat_Campus_Street_V3, Mat_Campus_Office_Parallax_Rooms_V6
- *  which export with raw emissive=[1,1,1] that washes buildings pure white under ACES HDR!)
+ * Tunes shadow flags AND permanently fixes pure-white blown-out GLB building materials!
+ * Specifically targets Mat_Pavilion_Arch_V5, Mat_Campus_Street_V3, Mat_Campus_Office_Parallax_Rooms_V6,
+ * Mat_Visitor_Glazing_And_PoppyMural_V6 & glass materials which exported with emissive=[1,1,1] +
+ * emissiveTexture + KHR_materials_emissive_strength that blew out facades pure white under ACES HDR!
  */
 function tuneWorldEntityMaterials(entity: pc.Entity, castShadows: boolean, receiveShadows = true): void {
   const comps = entity.findComponents('render') as pc.RenderComponent[];
@@ -684,53 +726,283 @@ function tuneWorldEntityMaterials(entity: pc.Entity, castShadows: boolean, recei
 
       const mName = (mat.name || '').toLowerCase();
       const isLampGlow = /lamp|light|beacon|glow|neon|led/i.test(mName);
-      if (!isLampGlow) {
-        const em = mat.emissive;
-        const emLum = em.r * 0.3 + em.g * 0.59 + em.b * 0.11;
-        if (!mat.emissiveMap && emLum > 0.35) {
-          // Kill blown-out solid white emissive that made buildings pure white!
-          mat.emissive.set(0, 0, 0);
-          mat.emissiveIntensity = 0;
-          // Give untextured white architectural slabs warm realistic sandstone/concrete tone
-          if (!mat.diffuseMap && mat.diffuse.r > 0.88 && mat.diffuse.g > 0.88 && mat.diffuse.b > 0.88) {
-            mat.diffuse.set(0.76, 0.74, 0.70);
-          }
-          mat.update();
-        } else if (mat.emissiveMap && mat.emissiveIntensity > 0.22) {
-          mat.emissiveIntensity = 0.16;
-          mat.update();
-        }
+      if (isLampGlow) continue;
+
+      const isArchGlass = /glass|glazing|window/i.test(mName);
+      const isCampusBuildingMat =
+        /pavilion_arch|campus_street|parallax_rooms|visitor_arch|limestone|terracotta|poppymural/i.test(mName);
+      const em = mat.emissive;
+      const emLum = em.r * 0.3 + em.g * 0.59 + em.b * 0.11;
+
+      let dirty = false;
+
+      // 1. Completely remove self-illuminating white emissive & emissiveMap on daytime campus buildings!
+      if (isCampusBuildingMat || emLum > 0.25) {
+        mat.emissiveMap = null;
+        mat.emissive.set(0, 0, 0);
+        mat.emissiveIntensity = 0;
+        dirty = true;
       }
+
+      // 2. Give glass facades sleek architectural slate-blue tint instead of milky white reflection
+      if (isArchGlass) {
+        mat.diffuse.set(0.30, 0.43, 0.56);
+        mat.useMetalness = true;
+        mat.metalness = 0.24;
+        mat.gloss = 0.86;
+        dirty = true;
+      } else if (isCampusBuildingMat) {
+        if (/parallax_rooms/i.test(mName)) {
+          mat.diffuse.set(0.56, 0.54, 0.50);
+        } else {
+          mat.diffuse.set(0.72, 0.70, 0.67);
+        }
+        mat.useMetalness = true;
+        mat.metalness = Math.min(mat.metalness, 0.10);
+        mat.gloss = Math.min(mat.gloss, 0.28);
+        dirty = true;
+      } else if (!mat.diffuseMap && mat.diffuse.r > 0.86 && mat.diffuse.g > 0.86 && mat.diffuse.b > 0.86) {
+        mat.diffuse.set(0.76, 0.74, 0.71);
+        mat.gloss = Math.min(mat.gloss, 0.36);
+        dirty = true;
+      }
+
+      if (dirty) mat.update();
     }
   }
 }
 
-// Traffic Loops along the campus main boulevards (Right-Hand Traffic!)
+/**
+ * Finds the true architectural ground-floor Y of a photogrammetry/city GLB (such as registon_opt.glb)
+ * by analyzing the vertical vertex distribution in the lower 35% of the model.
+ * Prevents stray subterranean tree roots or photogrammetry edge skirts from lifting the whole square into the air!
+ */
+function computeRobustGroundY(root: pc.Entity, bounds: pc.BoundingBox): number {
+  root.getWorldTransform();
+  const minY = bounds.center.y - bounds.halfExtents.y;
+  const totalH = Math.max(0.5, bounds.halfExtents.y * 2);
+  const cutoffY = minY + totalH * 0.34;
+  const comps = root.findComponents('render') as pc.RenderComponent[];
+  const samples: number[] = [];
+  const p = new pc.Vec3();
+
+  for (const rc of comps) {
+    if (!rc.enabled || !rc.entity.enabled) continue;
+    for (const mi of rc.meshInstances) {
+      if (!mi.visible || !mi.mesh) continue;
+      const pos: number[] = [];
+      const nVerts = mi.mesh.getPositions(pos);
+      if (nVerts < 3) continue;
+      const worldMat = mi.node.getWorldTransform();
+      const step = Math.max(1, Math.floor(nVerts / 2400));
+      for (let i = 0; i < nVerts; i += step) {
+        p.set(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+        worldMat.transformPoint(p, p);
+        samples.push(p.y);
+      }
+    }
+  }
+
+  if (samples.length < 24) return minY;
+  samples.sort((a, b) => a - b);
+
+  // Build 0.35m vertical histogram inside the lower 34% band to locate the flat plaza floor plane
+  const binSize = 0.35;
+  const bins = new Map<number, { count: number; sumY: number }>();
+  for (let i = 0; i < samples.length; i++) {
+    const y = samples[i];
+    if (y > cutoffY) break;
+    const bIdx = Math.floor((y - minY) / binSize);
+    const entry = bins.get(bIdx);
+    if (entry) {
+      entry.count++;
+      entry.sumY += y;
+    } else {
+      bins.set(bIdx, { count: 1, sumY: y });
+    }
+  }
+
+  let bestCount = 0;
+  let bestY = samples[Math.floor(samples.length * 0.14)];
+  for (const entry of bins.values()) {
+    if (entry.count > bestCount) {
+      bestCount = entry.count;
+      bestY = entry.sumY / entry.count;
+    }
+  }
+
+  const p14Y = samples[Math.floor(samples.length * 0.14)];
+  const chosenY = bestCount >= samples.length * 0.04 ? Math.max(bestY, p14Y) : p14Y;
+  // Never shift more than 28% of model height so domes & arches always stand tall above ground
+  return Math.max(minY, Math.min(minY + Math.min(totalH * 0.28, 8.5), chosenY));
+}
+
+/**
+ * Dedicated material tuner for Registon Square (registon_opt.glb):
+ * - Disables blue distance fog & blue HDR skybox reflection that turn sandstone walls blue-gray
+ * - Preserves authentic textured sandstone, terracotta & turquoise domes with warm indirect daylight bounce
+ * - Disables floating shadow cast artifacts from photogrammetry edge skirts
+ */
+function tuneRegistonMaterials(entity: pc.Entity): void {
+  const comps = entity.findComponents('render') as pc.RenderComponent[];
+  const fixedMats = new Set<pc.Material>();
+  for (const rc of comps) {
+    rc.castShadows = false;
+    rc.receiveShadows = false;
+    for (const mi of rc.meshInstances) {
+      const mat = mi.material;
+      if (!(mat instanceof pc.StandardMaterial) || fixedMats.has(mat)) continue;
+      fixedMats.add(mat);
+
+      mat.useFog = false;
+      mat.useSkybox = false;
+      mat.envAtlas = null;
+      mat.useMetalness = true;
+      mat.metalness = 0.0;
+      mat.gloss = 0.14;
+
+      if (mat.diffuseMap) {
+        mat.diffuse.set(1.0, 0.98, 0.94);
+        // Gentle warm indirect daylight using the model's own real texture so shadowed facades stay rich sandstone instead of blue-gray
+        mat.emissiveMap = mat.diffuseMap;
+        mat.emissive.set(0.54, 0.50, 0.44);
+        mat.emissiveIntensity = 0.62;
+      } else {
+        // Warm up untextured surfaces so they never look washed-out blue
+        mat.diffuse.set(
+          Math.min(1, mat.diffuse.r * 1.05 + 0.04),
+          Math.min(1, mat.diffuse.g * 1.0 + 0.02),
+          Math.max(0.15, mat.diffuse.b * 0.88)
+        );
+        mat.emissive.set(0.12, 0.10, 0.08);
+        mat.emissiveIntensity = 0.35;
+      }
+      mat.update();
+    }
+  }
+}
+
+/**
+ * Converts a closed road polygon into a smooth, natural-driving loop with rounded circular
+ * intersection turn arcs (no sharp 90° snapping corners!).
+ */
+function buildSmoothRoadLoop(
+  rawPoints: Array<{ x: number; z: number }>,
+  defaultRadius = 9.0,
+  arcSteps = 7
+): Array<{ x: number; z: number }> {
+  const n = rawPoints.length;
+  if (n < 3) return rawPoints;
+  const out: Array<{ x: number; z: number }> = [];
+
+  for (let i = 0; i < n; i++) {
+    const prev = rawPoints[(i - 1 + n) % n];
+    const curr = rawPoints[i];
+    const next = rawPoints[(i + 1) % n];
+
+    const v1x = prev.x - curr.x;
+    const v1z = prev.z - curr.z;
+    const l1 = Math.hypot(v1x, v1z);
+
+    const v2x = next.x - curr.x;
+    const v2z = next.z - curr.z;
+    const l2 = Math.hypot(v2x, v2z);
+
+    if (l1 < 0.5 || l2 < 0.5) {
+      out.push(curr);
+      continue;
+    }
+
+    const u1x = v1x / l1;
+    const u1z = v1z / l1;
+    const u2x = v2x / l2;
+    const u2z = v2z / l2;
+
+    const dot = Math.max(-1, Math.min(1, u1x * u2x + u1z * u2z));
+    // Nearly collinear points (e.g. roundabout arc vertices) don't need extra filleting
+    if (dot < -0.94) {
+      out.push(curr);
+      continue;
+    }
+
+    const cut = Math.min(defaultRadius, l1 * 0.36, l2 * 0.36);
+    const pStartX = curr.x + u1x * cut;
+    const pStartZ = curr.z + u1z * cut;
+    const pEndX = curr.x + u2x * cut;
+    const pEndZ = curr.z + u2z * cut;
+
+    for (let s = 0; s <= arcSteps; s++) {
+      const t = s / arcSteps;
+      const omt = 1 - t;
+      // Smooth quadratic Bezier corner fillet tangent to both road lanes
+      const x = omt * omt * pStartX + 2 * omt * t * curr.x + t * t * pEndX;
+      const z = omt * omt * pStartZ + 2 * omt * t * curr.z + t * t * pEndZ;
+      out.push({ x, z });
+    }
+  }
+  return out;
+}
+
+/** Generates smooth counter-clockwise right-hand roundabout arc around Tashkent Plaza (0, 29) */
+function makeRoundaboutArc(
+  cx: number,
+  cz: number,
+  radius: number,
+  startDeg: number,
+  endDeg: number,
+  steps = 8
+): Array<{ x: number; z: number }> {
+  const pts: Array<{ x: number; z: number }> = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const deg = startDeg + (endDeg - startDeg) * t;
+    const rad = (deg * Math.PI) / 180;
+    pts.push({ x: cx + Math.sin(rad) * radius, z: cz + Math.cos(rad) * radius });
+  }
+  return pts;
+}
+
+// Smooth Natural Right-Hand Traffic Loops with Rounded Corners & True Circular Roundabout Curves!
 const TRAFFIC_ROUTES: Array<Array<{ x: number; z: number }>> = [
-  [
-    { x: -114, z: 79.4 },
-    { x: 152, z: 79.4 },
-    { x: 152, z: -21.4 },
-    { x: -114, z: -21.4 },
-  ],
-  [
-    { x: -121.5, z: -14.6 },
-    { x: -121.5, z: 72.6 },
-    { x: -3.5, z: 72.6 },
-    { x: -3.5, z: 54 },
-    { x: -24, z: 29 },
-    { x: -3.5, z: 4 },
-    { x: -3.5, z: -14.6 },
-  ],
-  [
-    { x: 3.5, z: 54 },
-    { x: 3.5, z: 72.6 },
-    { x: 159.5, z: 72.6 },
-    { x: 159.5, z: -82.5 },
-    { x: 3.5, z: -82.5 },
-    { x: 3.5, z: 4 },
-    { x: 24, z: 29 },
-  ],
+  // Route 0: Outer Grand Campus Boulevard Loop (Charleston -> Bay View -> Amphitheatre -> West Campus)
+  buildSmoothRoadLoop(
+    [
+      { x: -114.5, z: 79.4 },
+      { x: 152.5, z: 79.4 },
+      { x: 152.5, z: -21.4 },
+      { x: -114.5, z: -21.4 },
+    ],
+    10.5,
+    8
+  ),
+  // Route 1: West Loop curving naturally around the West half of Tashkent TV Tower Roundabout!
+  buildSmoothRoadLoop(
+    [
+      { x: -121.5, z: -14.6 },
+      { x: -121.5, z: 72.6 },
+      { x: -3.5, z: 72.6 },
+      { x: -3.5, z: 54.0 },
+      ...makeRoundaboutArc(0, 29, 22.8, -16, -164, 9),
+      { x: -3.5, z: 4.0 },
+      { x: -3.5, z: -14.6 },
+    ],
+    7.5,
+    6
+  ),
+  // Route 2: East & North Creek Loop curving naturally around the East half of Tashkent TV Tower Roundabout!
+  buildSmoothRoadLoop(
+    [
+      { x: 3.5, z: 54.0 },
+      { x: 3.5, z: 72.6 },
+      { x: 159.5, z: 72.6 },
+      { x: 159.5, z: -82.5 },
+      { x: 3.5, z: -82.5 },
+      { x: 3.5, z: 4.0 },
+      ...makeRoundaboutArc(0, 29, 22.8, 164, 16, 9),
+    ],
+    7.5,
+    6
+  ),
 ];
 
 // ============================================================================
@@ -1040,9 +1312,21 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
   // 5. REGISTON SQUARE (registon_opt.glb) IN FRONT OF MOUNTAINS (~20% MAP, SOLID!)
   // ============================================================================
   const registonHolder = new pc.Entity('Registon_Square_Holder');
-  registonHolder.setLocalPosition(REGISTON_CENTER.x, 0.05, REGISTON_CENTER.z);
+  registonHolder.setLocalPosition(REGISTON_CENTER.x, 0.0, REGISTON_CENTER.z);
   registonHolder.setLocalEulerAngles(0, 32, 0);
   root.addChild(registonHolder);
+
+  // Flush architectural sandstone plaza apron directly on the ground under Registon so it blends seamlessly with zero air gap!
+  const registonGroundApron = new pc.Entity('Registon_Ground_Apron');
+  registonGroundApron.setLocalPosition(0, 0.03, 0);
+  registonGroundApron.setLocalScale(106, 0.06, 92);
+  registonGroundApron.addComponent('render', {
+    type: 'box',
+    material: plazaPaverMat,
+    castShadows: false,
+    receiveShadows: true,
+  });
+  registonHolder.addChild(registonGroundApron);
 
   let activeRegistonModel: pc.Entity = buildArchitecturalRegistonSquare(device);
   let customRegistonLoaded = false;
@@ -1112,8 +1396,21 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
 
       const bounds = computeEntityBounds(wrapper);
       if (bounds) {
-        const h = Math.max(0.2, bounds.halfExtents.y * 2);
-        const sc = 86.0 / h;
+        // Only rotate upright if the tower's longest axis is genuinely horizontal (X or Z >> Y)
+        const spanX = bounds.halfExtents.x * 2;
+        const spanY = bounds.halfExtents.y * 2;
+        const spanZ = bounds.halfExtents.z * 2;
+        if (spanZ > spanY * 1.45 && spanZ >= spanX) {
+          ent.setLocalEulerAngles(-90, 0, 0);
+        } else if (spanX > spanY * 1.45 && spanX > spanZ) {
+          ent.setLocalEulerAngles(0, 0, 90);
+        }
+
+        const uprightBounds = computeEntityBounds(wrapper) || bounds;
+        const h = Math.max(0.2, uprightBounds.halfExtents.y * 2);
+        const horiz = Math.max(0.2, uprightBounds.halfExtents.x * 2, uprightBounds.halfExtents.z * 2);
+        // Scale cleanly to 86m tall AND guarantee base footprint never exceeds the 26m plaza!
+        const sc = Math.min(86.0 / h, 26.0 / horiz);
         ent.setLocalScale(sc, sc, sc);
 
         const scaled = computeEntityBounds(wrapper);
@@ -1152,9 +1449,11 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     try {
       const resource = await loadContainerUrl(app, url, name);
       const wrapper = new pc.Entity('Registon_CustomGLB');
-      const ent = resource.instantiateRenderEntity({ castShadows: true, receiveShadows: true });
+      const ent = resource.instantiateRenderEntity({ castShadows: false, receiveShadows: false });
       wrapper.addChild(ent);
-      registonHolder.addChild(wrapper);
+
+      // Measure & normalize cleanly at world origin (unrotated!) BEFORE parenting to rotated registonHolder!
+      app.root.addChild(wrapper);
 
       const bounds = computeEntityBounds(wrapper);
       if (bounds) {
@@ -1165,17 +1464,16 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
 
         const scaled = computeEntityBounds(wrapper);
         if (scaled) {
-          const minY = scaled.center.y - scaled.halfExtents.y;
-          const holderPos = registonHolder.getPosition();
-          ent.setLocalPosition(
-            holderPos.x - scaled.center.x,
-            holderPos.y - minY,
-            holderPos.z - scaled.center.z
-          );
+          // Detect true plaza floor Y (ignoring stray hanging tree-roots/skirt vertices) and seat firmly INTO ground!
+          const groundY = computeRobustGroundY(wrapper, scaled);
+          ent.setLocalPosition(-scaled.center.x, -groundY - 0.35, -scaled.center.z);
         }
       }
 
-      tuneWorldEntityMaterials(wrapper, true, true);
+      app.root.removeChild(wrapper);
+      registonHolder.addChild(wrapper);
+
+      tuneRegistonMaterials(wrapper);
       activeRegistonModel.destroy();
       activeRegistonModel = wrapper;
       customRegistonLoaded = true;
@@ -1195,12 +1493,34 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     }
   }
 
+  function sampleRouteAtDist(
+    route: Array<{ x: number; z: number }>,
+    segLengths: number[],
+    totalLen: number,
+    distInput: number
+  ): { x: number; z: number; yawDeg: number } {
+    let dist = ((distInput % totalLen) + totalLen) % totalLen;
+    let segIdx = 0;
+    while (segIdx < segLengths.length - 1 && dist > segLengths[segIdx]) {
+      dist -= segLengths[segIdx];
+      segIdx++;
+    }
+    const a = route[segIdx];
+    const b = route[(segIdx + 1) % route.length];
+    const t = dist / Math.max(0.01, segLengths[segIdx]);
+    const x = a.x + (b.x - a.x) * t;
+    const z = a.z + (b.z - a.z) * t;
+    const yawDeg = (Math.atan2(-(b.x - a.x), -(b.z - a.z)) * 180) / Math.PI;
+    return { x, z, yawDeg };
+  }
+
   function registerTrafficCar(
     entity: pc.Entity,
-    wheels: Array<{ spinPivot: pc.Entity; radius: number }>,
+    wheels: TrafficWheelRef[],
     routeIndex: number,
     phase: number,
-    speed: number
+    speed: number,
+    opts?: { damageRig?: CarDamageRig | null; carWidth?: number; carLength?: number }
   ): void {
     const route = TRAFFIC_ROUTES[routeIndex % TRAFFIC_ROUTES.length];
     const segLengths: number[] = [];
@@ -1212,19 +1532,55 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       segLengths.push(l);
       totalLen += l;
     }
+    const normPhase = ((phase % 1) + 1) % 1;
+    const initial = sampleRouteAtDist(route, segLengths, totalLen, normPhase * totalLen);
+    entity.setLocalPosition(initial.x, getTerrainHeight(initial.x, initial.z), initial.z);
+    entity.setLocalEulerAngles(0, initial.yawDeg, 0);
     root.addChild(entity);
+
     trafficAgents.push({
       entity,
       wheels,
-      speed,
-      phase: ((phase % 1) + 1) % 1,
+      damageRig: opts?.damageRig ?? null,
+      carWidth: opts?.carWidth ?? 1.9,
+      carLength: opts?.carLength ?? 4.3,
+      baseSpeed: speed,
+      curSpeed: speed * 0.7,
+      phase: normPhase,
       route,
       segLengths,
       totalLen,
       spinDeg: 0,
-      x: route[0].x,
-      z: route[0].z,
+      steerDeg: 0,
+      yaw: initial.yawDeg,
+      x: initial.x,
+      z: initial.z,
+      offsetX: 0,
+      offsetZ: 0,
+      knockVx: 0,
+      knockVz: 0,
+      knockYaw: 0,
+      knockYawVel: 0,
+      stunTimer: 0,
     });
+  }
+
+  function applyTrafficCrash(
+    agent: TrafficAgent,
+    impulseVx: number,
+    impulseVz: number,
+    worldHitPoint: pc.Vec3,
+    worldHitDir: pc.Vec3,
+    intensity: number
+  ): void {
+    agent.knockVx += impulseVx;
+    agent.knockVz += impulseVz;
+    agent.knockYawVel += (Math.random() - 0.5) * 140 * intensity;
+    agent.curSpeed *= 0.25;
+    agent.stunTimer = Math.max(agent.stunTimer, 1.35 + intensity * 1.1);
+    if (agent.damageRig) {
+      agent.damageRig.applyImpact(worldHitPoint, worldHitDir, intensity);
+    }
   }
 
   // 6. Real Campus GLB Environment Loader
@@ -1294,7 +1650,6 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       treesScene,
       androidScene,
       stanScene,
-      waymoScene,
       envV3Scene,
     ] = await Promise.all([
       safeLoad('./assets/glb/gradient_canopy_v6.glb', 'gradient_canopy_v6'),
@@ -1304,7 +1659,6 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       safeLoad('./assets/glb/trees_v4.glb', 'trees_v4'),
       safeLoad('./assets/glb/android_statues_v2.glb', 'android_statues_v2'),
       safeLoad('./assets/glb/stan_trex_v5.glb', 'stan_trex_v5'),
-      safeLoad('./assets/glb/waymo_gen6_v4.glb', 'waymo_gen6_v4'),
       safeLoad('./assets/glb/campus_environment_v3.glb', 'campus_environment_v3'),
     ]);
 
@@ -1660,20 +2014,6 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       }
       envV3Scene.destroy();
     }
-
-    // J. Keep 1 subtle Waymo cruiser on outer loop while user's own .glb cars dominate the roads!
-    if (waymoScene) {
-      const proto = findChildByPattern(waymoScene, /^Waymo_Gen6_V4$/i);
-      if (proto) {
-        const wClone = proto.clone() as pc.Entity;
-        tuneWorldEntityMaterials(wClone, !isMobile, true);
-        const holder = new pc.Entity('Traffic_Waymo');
-        wClone.setLocalEulerAngles(0, 180, 0);
-        holder.addChild(wClone);
-        registerTrafficCar(holder, [], 0, 0.62, 8.8);
-      }
-      waymoScene.destroy();
-    }
   }
 
   function getTerrainHeight(x: number, z: number): number {
@@ -1752,7 +2092,12 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     hdrEnv.apply(mode, camera);
   }
 
-  function update(dt: number, elapsedSec: number, playerPos: pc.Vec3): void {
+  function update(
+    dt: number,
+    elapsedSec: number,
+    playerPos: pc.Vec3,
+    pedestrians?: Array<{ x: number; z: number }>
+  ): void {
     for (let i = 0; i < pinwheelRotors.length; i++) {
       pinwheelRotors[i].rotateLocal(0, 0, dt * (58 + i * 14));
     }
@@ -1767,7 +2112,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       wm.update();
     }
 
-    // Gently sway tree leaves & ornamental grass plumes in the California/Tashkent breeze!
+    // Gently sway tree leaves & ornamental grass plumes in the breeze!
     for (let i = 0; i < swayingFoliage.length; i++) {
       const s = swayingFoliage[i];
       const w1 = Math.sin(elapsedSec * s.speed + s.phase) * s.ampDeg;
@@ -1775,38 +2120,143 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
       s.node.setLocalEulerAngles(s.baseX + w1, s.baseY, s.baseZ + w2);
     }
 
-    // Drive ALL road traffic cars smoothly along boulevards!
+    // Natural Intelligent AI Road Traffic:
+    // - Smooth curved turns & circular Tashkent Roundabout arcs
+    // - Looks ahead to slow down into curves & physically steer front wheels
+    // - Yields/brakes cleanly behind other traffic cars, player car & crossing pedestrians
+    // - Physically jolts, dents & briefly pauses when rammed, then smoothly rejoins its lane!
     for (let i = 0; i < trafficAgents.length; i++) {
       const agent = trafficAgents[i];
-      const distPlayer = Math.hypot(playerPos.x - agent.x, playerPos.z - agent.z);
-      const speedMul = distPlayer < 7.5 ? 0.0 : distPlayer < 13.0 ? 0.35 : 1.0;
-      const curSpeed = agent.speed * speedMul;
+      const yawRad = (agent.yaw * Math.PI) / 180;
+      const fwdX = -Math.sin(yawRad);
+      const fwdZ = -Math.cos(yawRad);
+      const rightX = Math.cos(yawRad);
+      const rightZ = -Math.sin(yawRad);
 
-      agent.phase = (agent.phase + (curSpeed * dt) / agent.totalLen) % 1;
-      let dist = agent.phase * agent.totalLen;
-      let segIdx = 0;
-      while (segIdx < agent.segLengths.length - 1 && dist > agent.segLengths[segIdx]) {
-        dist -= agent.segLengths[segIdx];
-        segIdx++;
+      // 1. Apply crash slide/jolt physics & smooth lane recovery
+      if (agent.stunTimer > 0) {
+        agent.stunTimer = Math.max(0, agent.stunTimer - dt);
       }
-      const a = agent.route[segIdx];
-      const b = agent.route[(segIdx + 1) % agent.route.length];
-      const t = dist / Math.max(0.01, agent.segLengths[segIdx]);
-      const wx = a.x + (b.x - a.x) * t;
-      const wz = a.z + (b.z - a.z) * t;
+      if (Math.hypot(agent.knockVx, agent.knockVz) > 0.05) {
+        agent.offsetX += agent.knockVx * dt;
+        agent.offsetZ += agent.knockVz * dt;
+        const damp = Math.exp(-5.2 * dt);
+        agent.knockVx *= damp;
+        agent.knockVz *= damp;
+      }
+      if (Math.abs(agent.knockYawVel) > 0.2) {
+        agent.knockYaw += agent.knockYawVel * dt;
+        agent.knockYawVel *= Math.exp(-5.5 * dt);
+      }
+      // Clamp lateral crash drift so AI doesn't get flung permanently off the map
+      const offLen = Math.hypot(agent.offsetX, agent.offsetZ);
+      if (offLen > 6.5) {
+        agent.offsetX *= 6.5 / offLen;
+        agent.offsetZ *= 6.5 / offLen;
+      }
+
+      // 2. Look ahead along road spline for curve anticipation!
+      const curDist = agent.phase * agent.totalLen;
+      const aheadNear = sampleRouteAtDist(agent.route, agent.segLengths, agent.totalLen, curDist + 6.0);
+      const aheadFar = sampleRouteAtDist(agent.route, agent.segLengths, agent.totalLen, curDist + 14.5);
+      const curveTurnDeg = ((aheadFar.yawDeg - aheadNear.yawDeg + 540) % 360) - 180;
+      const curveSeverity = Math.min(1, Math.abs(curveTurnDeg) / 48);
+
+      // Natural speed profile: slow down nicely before corners/roundabout, cruise on straights
+      let targetSpeed = agent.baseSpeed * (1 - curveSeverity * 0.44);
+      if (agent.stunTimer > 0) {
+        targetSpeed = 0;
+      }
+
+      // 3. Yield / Brake naturally for the Player (in car or on foot) ahead in our lane cone
+      const pDx = playerPos.x - agent.x;
+      const pDz = playerPos.z - agent.z;
+      const pFwd = pDx * fwdX + pDz * fwdZ;
+      const pLat = Math.abs(pDx * rightX + pDz * rightZ);
+      if (pFwd > 1.2 && pFwd < 15.0 && pLat < 3.4) {
+        const factor = Math.max(0, (pFwd - 6.6) / 8.4);
+        targetSpeed = Math.min(targetSpeed, agent.baseSpeed * factor);
+      }
+
+      // 4. Maintain safe following distance behind OTHER AI traffic cars ahead!
+      for (let j = 0; j < trafficAgents.length; j++) {
+        if (i === j) continue;
+        const other = trafficAgents[j];
+        const oDx = other.x - agent.x;
+        const oDz = other.z - agent.z;
+        const oFwd = oDx * fwdX + oDz * fwdZ;
+        const oLat = Math.abs(oDx * rightX + oDz * rightZ);
+        if (oFwd > 1.0 && oFwd < 16.5 && oLat < 3.1) {
+          const factor = Math.max(0, (oFwd - 7.4) / 9.1);
+          targetSpeed = Math.min(targetSpeed, Math.min(other.curSpeed + 0.6, agent.baseSpeed * factor));
+        }
+      }
+
+      // 5. Gently yield for pedestrians near the road ahead
+      if (pedestrians) {
+        for (let k = 0; k < pedestrians.length; k++) {
+          const ped = pedestrians[k];
+          const dx = ped.x - agent.x;
+          const dz = ped.z - agent.z;
+          const f = dx * fwdX + dz * fwdZ;
+          const l = Math.abs(dx * rightX + dz * rightZ);
+          if (f > 1.0 && f < 10.5 && l < 2.6) {
+            targetSpeed = Math.min(targetSpeed, agent.baseSpeed * Math.max(0, (f - 4.2) / 6.3));
+          }
+        }
+      }
+
+      // Smooth human-like acceleration & braking
+      const rate = targetSpeed < agent.curSpeed ? 5.8 : 2.6;
+      agent.curSpeed += (targetSpeed - agent.curSpeed) * Math.min(1, dt * rate);
+      if (agent.curSpeed < 0.05 && targetSpeed < 0.05) agent.curSpeed = 0;
+
+      // Gently steer back toward road centerline once unstunned and moving
+      if (agent.stunTimer <= 0 && agent.curSpeed > 0.5) {
+        const rec = Math.exp(-1.4 * dt);
+        agent.offsetX *= rec;
+        agent.offsetZ *= rec;
+        agent.knockYaw *= Math.exp(-2.2 * dt);
+      }
+
+      // Advance smoothly along the curved road loop
+      agent.phase = (agent.phase + (agent.curSpeed * dt) / agent.totalLen) % 1;
+      const onRoute = sampleRouteAtDist(agent.route, agent.segLengths, agent.totalLen, agent.phase * agent.totalLen);
+      const lookPt = sampleRouteAtDist(agent.route, agent.segLengths, agent.totalLen, agent.phase * agent.totalLen + 4.8);
+
+      const wx = onRoute.x + agent.offsetX;
+      const wz = onRoute.z + agent.offsetZ;
       agent.x = wx;
       agent.z = wz;
 
-      const yawDeg = (Math.atan2(-(b.x - a.x), -(b.z - a.z)) * 180) / Math.PI;
-      agent.entity.setLocalPosition(wx, getTerrainHeight(wx, wz), wz);
-      agent.entity.setLocalEulerAngles(0, yawDeg, 0);
+      // Smooth heading interpolation toward look-ahead target (zero jarring angle snaps!)
+      const desiredYaw =
+        (Math.atan2(-(lookPt.x - wx), -(lookPt.z - wz)) * 180) / Math.PI + agent.knockYaw;
+      const yawDiff = ((desiredYaw - agent.yaw + 540) % 360) - 180;
+      const turnLerp = agent.curSpeed > 0.3 ? Math.min(1, dt * 6.5) : Math.min(1, dt * 2.5);
+      agent.yaw += yawDiff * turnLerp;
 
-      if (agent.wheels.length > 0 && curSpeed > 0.05) {
-        const r = agent.wheels[0].radius || 0.35;
-        agent.spinDeg += ((curSpeed * dt) / Math.max(0.22, r)) * (180 / Math.PI);
-        for (let w = 0; w < agent.wheels.length; w++) {
-          agent.wheels[w].spinPivot.setLocalEulerAngles(-agent.spinDeg, 0, 0);
+      agent.entity.setLocalPosition(wx, getTerrainHeight(wx, wz), wz);
+      agent.entity.setLocalEulerAngles(0, agent.yaw, 0);
+
+      // Physically steer front wheels into curves & spin all 4 wheels smoothly!
+      const targetSteer = Math.max(-28, Math.min(28, yawDiff * 1.45));
+      agent.steerDeg += (targetSteer - agent.steerDeg) * Math.min(1, dt * 9);
+
+      if (agent.wheels.length > 0) {
+        if (agent.curSpeed > 0.05) {
+          const r = agent.wheels[0].radius || 0.35;
+          agent.spinDeg += ((agent.curSpeed * dt) / Math.max(0.22, r)) * (180 / Math.PI);
         }
+        for (let w = 0; w < agent.wheels.length; w++) {
+          const wh = agent.wheels[w];
+          wh.steerPivot.setLocalEulerAngles(0, wh.isFront ? agent.steerDeg : 0, 0);
+          wh.spinPivot.setLocalEulerAngles(-agent.spinDeg, 0, 0);
+        }
+      }
+
+      if (agent.damageRig) {
+        agent.damageRig.updateSmoke(dt, agent.curSpeed);
       }
     }
   }
@@ -1816,6 +2266,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     hdrEnv,
     colliders,
     ramps,
+    trafficAgents,
     worldRadius: 245,
     tashkentCenter: TASHKENT_CENTER,
     registonCenter: REGISTON_CENTER,
@@ -1824,6 +2275,7 @@ export function buildPlayCanvasOpenWorld(app: pc.Application, isMobile: boolean)
     getNearestTrafficProximity,
     setTimeOfDay,
     update,
+    applyTrafficCrash,
     loadCampusAssets,
     loadTashkentGlbUrl,
     loadTashkentGlbFile,

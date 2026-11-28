@@ -1,6 +1,5 @@
 import './styles.css';
 import { ControlState, HudTelemetry, PlayCanvasCarGame } from './playcanvas/engine';
-import { LicensePlateConfig, PlateStyle } from './playcanvas/licensePlate';
 
 const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
 if (!canvas) {
@@ -15,14 +14,12 @@ const reloadBtn = document.getElementById('btn-reload-gl')!;
 
 const modeDotEl = document.getElementById('hud-mode-dot')!;
 const carNameEl = document.getElementById('hud-car-name')!;
-const plateShortEl = document.getElementById('hud-plate-short')!;
 const speedValEl = document.getElementById('speed-val')!;
 const gearEl = document.getElementById('speed-gear')!;
 const rpmFillEl = document.getElementById('rpm-fill')!;
 const nitroFillEl = document.getElementById('nitro-fill')!;
 
 const btnGarage = document.getElementById('btn-garage')!;
-const btnPlateQuick = document.getElementById('btn-plate-quick')!;
 const btnCamera = document.getElementById('btn-camera')!;
 const btnTime = document.getElementById('btn-time')!;
 const btnSound = document.getElementById('btn-sound')!;
@@ -43,7 +40,6 @@ const garageList = document.getElementById('garage-list')!;
 const tabBtns = Array.from(document.querySelectorAll<HTMLButtonElement>('.tab-btn'));
 const tabPanes: Record<string, HTMLElement> = {
   cars: document.getElementById('tab-cars')!,
-  plate: document.getElementById('tab-plate')!,
   world: document.getElementById('tab-world')!,
 };
 
@@ -62,29 +58,9 @@ const charStatusEl = document.getElementById('char-status')!;
 const tashkentStatusEl = document.getElementById('tashkent-status')!;
 const registonStatusEl = document.getElementById('registon-status')!;
 
-// License Plate Controls
-const platePreviewEl = document.getElementById('plate-preview')!;
-const platePrevRegion = document.getElementById('plate-prev-region')!;
-const platePrevText = document.getElementById('plate-prev-text')!;
-const plateRegionInput = document.getElementById('plate-region') as HTMLInputElement;
-const plateTextInput = document.getElementById('plate-text') as HTMLInputElement;
-const plateEnabledInput = document.getElementById('plate-enabled') as HTMLInputElement;
-const plateFrontY = document.getElementById('plate-front-y') as HTMLInputElement;
-const plateFrontZ = document.getElementById('plate-front-z') as HTMLInputElement;
-const plateRearY = document.getElementById('plate-rear-y') as HTMLInputElement;
-const plateRearZ = document.getElementById('plate-rear-z') as HTMLInputElement;
-const plateScale = document.getElementById('plate-scale') as HTMLInputElement;
-const valFrontY = document.getElementById('val-front-y')!;
-const valFrontZ = document.getElementById('val-front-z')!;
-const valRearY = document.getElementById('val-rear-y')!;
-const valRearZ = document.getElementById('val-rear-z')!;
-const valPlateScale = document.getElementById('val-plate-scale')!;
-const stylePills = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-plate-style]'));
-
 let lastCarsSignature = '';
-let lastSyncedPlateCarId = '';
 
-function openDrawer(tab: 'cars' | 'plate' | 'world'): void {
+function openDrawer(tab: 'cars' | 'world'): void {
   garageBackdrop.classList.remove('hidden');
   for (const b of tabBtns) {
     b.classList.toggle('active', b.dataset.tab === tab);
@@ -96,36 +72,9 @@ function openDrawer(tab: 'cars' | 'plate' | 'world'): void {
 
 for (const b of tabBtns) {
   b.addEventListener('click', () => {
-    const t = b.dataset.tab as 'cars' | 'plate' | 'world';
+    const t = b.dataset.tab as 'cars' | 'world';
     if (t) openDrawer(t);
   });
-}
-
-function syncPlateEditorFromConfig(cfg: LicensePlateConfig): void {
-  platePreviewEl.className = `uz-plate-live style-${cfg.style}`;
-  platePrevRegion.textContent = (cfg.region || '01').toUpperCase();
-  platePrevText.textContent = (cfg.text || 'A 777 AA').toUpperCase();
-  plateShortEl.textContent = `${cfg.region} ${cfg.text}`.trim();
-
-  if (document.activeElement !== plateRegionInput) plateRegionInput.value = cfg.region;
-  if (document.activeElement !== plateTextInput) plateTextInput.value = cfg.text;
-  plateEnabledInput.checked = cfg.enabled;
-
-  plateFrontY.value = cfg.frontY.toFixed(2);
-  plateFrontZ.value = cfg.frontZ.toFixed(2);
-  plateRearY.value = cfg.rearY.toFixed(2);
-  plateRearZ.value = cfg.rearZ.toFixed(2);
-  plateScale.value = cfg.scale.toFixed(2);
-
-  valFrontY.textContent = cfg.frontY.toFixed(2);
-  valFrontZ.textContent = cfg.frontZ.toFixed(2);
-  valRearY.textContent = cfg.rearY.toFixed(2);
-  valRearZ.textContent = cfg.rearZ.toFixed(2);
-  valPlateScale.textContent = `${Math.round(cfg.scale * 100)}%`;
-
-  for (const p of stylePills) {
-    p.classList.toggle('active', p.dataset.plateStyle === cfg.style);
-  }
 }
 
 function renderGarageList(t: HudTelemetry, game: PlayCanvasCarGame): void {
@@ -205,7 +154,7 @@ function syncHud(t: HudTelemetry, game: PlayCanvasCarGame): void {
 
   // World & Character status
   charStatusEl.textContent = t.isCustomCharacter
-    ? `Loaded: ${t.characterLabel}`
+    ? `Loaded: ${t.characterLabel} (Punch, Kick, Roll, Shoot, Interact)`
     : 'Realistic Human (drop models/character.glb or Load below)';
   tashkentStatusEl.textContent = t.isCustomTashkent
     ? 'Loaded: tashkent.glb · Central Plaza (0, 29)'
@@ -213,15 +162,6 @@ function syncHud(t: HudTelemetry, game: PlayCanvasCarGame): void {
   registonStatusEl.textContent = t.isCustomRegiston
     ? 'Loaded: registon_opt.glb · Samarqand 2027'
     : 'Samarqand 2027 Registon (drop models/registon_opt.glb or Load below)';
-
-  // Sync license plate UI when active car changes
-  const activeCar = t.cars.find((c) => c.id === t.activeCarId);
-  if (activeCar && activeCar.id !== lastSyncedPlateCarId) {
-    lastSyncedPlateCarId = activeCar.id;
-    syncPlateEditorFromConfig(activeCar.plate);
-  } else if (activeCar) {
-    plateShortEl.textContent = `${activeCar.plate.region} ${activeCar.plate.text}`.trim();
-  }
 
   renderGarageList(t, game);
 }
@@ -251,10 +191,6 @@ btnGarage.addEventListener('click', () => {
   if (garageBackdrop.classList.contains('hidden')) openDrawer('cars');
   else garageBackdrop.classList.add('hidden');
 });
-btnPlateQuick.addEventListener('click', () => {
-  game.audio.unlock();
-  openDrawer('plate');
-});
 garageClose.addEventListener('click', () => garageBackdrop.classList.add('hidden'));
 garageBackdrop.addEventListener('click', (e) => {
   if (e.target === garageBackdrop) garageBackdrop.classList.add('hidden');
@@ -272,37 +208,7 @@ btnEnterExit.addEventListener('pointerdown', (e) => {
   game.toggleEnterExitCar();
 });
 
-// License Plate Real-Time Editing
-function pushPlateUpdate(patch: Partial<LicensePlateConfig>): void {
-  game.updateActiveCarPlate(patch);
-  const car = game.fleet.getActiveCar();
-  if (car) syncPlateEditorFromConfig(car.plateRig.config);
-}
-
-plateRegionInput.addEventListener('input', () => {
-  const cleaned = plateRegionInput.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 2);
-  pushPlateUpdate({ region: cleaned || '01' });
-});
-plateTextInput.addEventListener('input', () => {
-  const cleaned = plateTextInput.value.toUpperCase().slice(0, 10);
-  pushPlateUpdate({ text: cleaned || 'A 777 AA' });
-});
-plateEnabledInput.addEventListener('change', () => {
-  pushPlateUpdate({ enabled: plateEnabledInput.checked });
-});
-for (const p of stylePills) {
-  p.addEventListener('click', () => {
-    const st = (p.dataset.plateStyle as PlateStyle) || 'white';
-    pushPlateUpdate({ style: st });
-  });
-}
-plateFrontY.addEventListener('input', () => pushPlateUpdate({ frontY: Number(plateFrontY.value) }));
-plateFrontZ.addEventListener('input', () => pushPlateUpdate({ frontZ: Number(plateFrontZ.value) }));
-plateRearY.addEventListener('input', () => pushPlateUpdate({ rearY: Number(plateRearY.value) }));
-plateRearZ.addEventListener('input', () => pushPlateUpdate({ rearZ: Number(plateRearZ.value) }));
-plateScale.addEventListener('input', () => pushPlateUpdate({ scale: Number(plateScale.value) }));
-
-// Runtime Local GLB Loaders (Car, character.glb, tashkent.glb)
+// Runtime Local GLB Loaders (Car, character.glb, tashkent.glb, registon_opt.glb)
 btnImportGlb.addEventListener('click', () => fileInputGlb.click());
 fileInputGlb.addEventListener('change', async () => {
   const file = fileInputGlb.files?.[0];
@@ -417,6 +323,30 @@ document.getElementById('touch-punch')?.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   e.stopPropagation();
   game.triggerPunch();
+});
+
+document.getElementById('touch-kick')?.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  game.triggerKick();
+});
+
+document.getElementById('touch-roll')?.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  game.triggerRoll();
+});
+
+document.getElementById('touch-shoot')?.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  game.triggerShoot();
+});
+
+document.getElementById('touch-interact')?.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  game.triggerInteract();
 });
 
 // On-Foot Virtual Analog Thumbstick

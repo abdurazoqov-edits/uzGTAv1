@@ -171,6 +171,23 @@ body {
   letter-spacing: 0.02em;
 }
 
+.hp-bar-wrap {
+  width: 58px;
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+  margin-left: 4px;
+}
+
+.hp-bar-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #ef4444, #22c55e);
+  transition: width 0.16s ease;
+}
+
 .hud-sep {
   opacity: 0.45;
 }
@@ -337,10 +354,13 @@ body {
   pointer-events: none;
 }
 
-/* Circular Transparent Action Buttons (Door, Horn, Drift, Nitro, Run) */
+/* Circular Transparent Action Buttons (Door, Horn, Drift, Nitro, Combat, Roll, Shoot, Use) */
 .action-arc {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  max-width: 244px;
   gap: 8px;
 }
 
@@ -387,6 +407,30 @@ body {
 .gt-punch:active {
   background: rgba(239, 68, 68, 0.42);
   border-color: rgba(254, 202, 202, 0.92);
+}
+
+.gt-kick {
+  border-color: rgba(250, 204, 21, 0.68);
+  background: rgba(202, 138, 4, 0.20);
+}
+
+.gt-roll {
+  border-color: rgba(167, 139, 250, 0.68);
+  background: rgba(124, 58, 237, 0.20);
+}
+
+.gt-shoot {
+  border-color: rgba(248, 113, 113, 0.78);
+  background: rgba(220, 38, 38, 0.24);
+}
+
+.gt-shoot:active {
+  background: rgba(239, 68, 68, 0.48);
+}
+
+.gt-interact {
+  border-color: rgba(45, 212, 191, 0.68);
+  background: rgba(13, 148, 136, 0.20);
 }
 
 /* Translucent Vertical Brake & Gas Pedals */

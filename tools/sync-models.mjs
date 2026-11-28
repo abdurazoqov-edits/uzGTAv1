@@ -7,6 +7,8 @@ const SOURCE_MODELS_DIR = path.join(ROOT_DIR, 'models');
 const PUBLIC_MODELS_DIR = path.join(ROOT_DIR, 'public', 'models');
 
 const CHARACTER_RE = /^character(?:[_-].*)?\.glb$/i;
+const ZOMBIE_RE = /^zombie(?:[_-].*)?\.glb$/i;
+const SOLDIER_RE = /^soldier(?:[_-].*)?\.glb$/i;
 const TASHKENT_RE = /^(?:tashkent|toshkent|teleminora)(?:[_-].*)?\.glb$/i;
 const REGISTON_RE = /^(?:registon|registan)(?:[_-].*)?\.glb$/i;
 
@@ -86,6 +88,8 @@ export async function syncModelsManifest() {
 
   const cars = [];
   let character = null;
+  let zombie = null;
+  let soldier = null;
   let landmarkTashkent = null;
   let landmarkRegiston = null;
 
@@ -114,6 +118,20 @@ export async function syncModelsManifest() {
       continue;
     }
 
+    if (ZOMBIE_RE.test(fileName)) {
+      if (!zombie || /^zombie\.glb$/i.test(fileName)) {
+        zombie = entry;
+      }
+      continue;
+    }
+
+    if (SOLDIER_RE.test(fileName)) {
+      if (!soldier || /^soldier\.glb$/i.test(fileName)) {
+        soldier = entry;
+      }
+      continue;
+    }
+
     if (TASHKENT_RE.test(fileName)) {
       if (!landmarkTashkent || /^tashkent\.glb$/i.test(fileName)) {
         landmarkTashkent = entry;
@@ -136,11 +154,13 @@ export async function syncModelsManifest() {
   }
 
   const manifest = {
-    version: 3,
+    version: 4,
     generatedAt: new Date().toISOString(),
     count: cars.length,
     cars,
     character,
+    zombie,
+    soldier,
     landmarkTashkent,
     landmarkRegiston,
   };
@@ -149,7 +169,7 @@ export async function syncModelsManifest() {
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
   console.log(
-    `[sync-models] Discovered ${cars.length} car(s)${character ? ', character.glb' : ''}${landmarkTashkent ? ', tashkent.glb' : ''}${landmarkRegiston ? `, ${landmarkRegiston.fileName}` : ''} -> public/models/manifest.json`
+    `[sync-models] Discovered ${cars.length} car(s)${character ? ', character.glb' : ''}${zombie ? `, ${zombie.fileName}` : ''}${soldier ? `, ${soldier.fileName}` : ''}${landmarkTashkent ? ', tashkent.glb' : ''}${landmarkRegiston ? `, ${landmarkRegiston.fileName}` : ''} -> public/models/manifest.json`
   );
   return manifest;
 }

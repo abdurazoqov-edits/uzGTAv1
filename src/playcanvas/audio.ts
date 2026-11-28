@@ -512,6 +512,219 @@ export class CarAudioEngine {
     src.stop(now + 0.28);
   }
 
+  /** Realistic multi-layered car collision crash (metal crunch + chassis boom + metallic scrape/glass) */
+  public playCarCrash(intensity = 0.7): void {
+    this.unlock();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const mag = Math.max(0.2, Math.min(1.0, intensity));
+
+    // 1. Deep chassis impact boom
+    const boom = this.ctx.createOscillator();
+    boom.type = 'triangle';
+    boom.frequency.setValueAtTime(118 + mag * 42, now);
+    boom.frequency.exponentialRampToValueAtTime(28, now + 0.28);
+    const boomGain = this.ctx.createGain();
+    boomGain.gain.setValueAtTime(0.68 * mag, now);
+    boomGain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+    boom.connect(boomGain);
+    boomGain.connect(this.masterGain);
+    boom.start(now);
+    boom.stop(now + 0.34);
+
+    // 2. Crumpling sheet-metal noise crunch
+    if (this.noiseBuffer) {
+      const crunch = this.ctx.createBufferSource();
+      crunch.buffer = this.noiseBuffer;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(680 + mag * 460, now);
+      bp.frequency.exponentialRampToValueAtTime(240, now + 0.38);
+      bp.Q.value = 1.25;
+      const cGain = this.ctx.createGain();
+      cGain.gain.setValueAtTime(0.75 * mag, now);
+      cGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+      crunch.connect(bp);
+      bp.connect(cGain);
+      cGain.connect(this.masterGain);
+      crunch.start(now);
+      crunch.stop(now + 0.44);
+
+      // 3. Metallic scrape / headlight glass shatter sparkle on heavy hits
+      if (mag > 0.42) {
+        const glass = this.ctx.createBufferSource();
+        glass.buffer = this.noiseBuffer;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.setValueAtTime(2800, now + 0.02);
+        const gGain = this.ctx.createGain();
+        gGain.gain.setValueAtTime(0.001, now);
+        gGain.gain.linearRampToValueAtTime(0.32 * mag, now + 0.035);
+        gGain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+        glass.connect(hp);
+        hp.connect(gGain);
+        gGain.connect(this.masterGain);
+        glass.start(now);
+        glass.stop(now + 0.36);
+      }
+    }
+  }
+
+  /** Heavy martial-arts kick impact (deeper chest thud + wind snap) */
+  public playKickHit(): void {
+    this.unlock();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(132, now);
+    osc.frequency.exponentialRampToValueAtTime(34, now + 0.18);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.88, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.22);
+
+    if (this.noiseBuffer) {
+      const n = this.ctx.createBufferSource();
+      n.buffer = this.noiseBuffer;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(860, now);
+      bp.Q.value = 0.8;
+      const ng = this.ctx.createGain();
+      ng.gain.setValueAtTime(0.62, now);
+      ng.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      n.connect(bp);
+      bp.connect(ng);
+      ng.connect(this.masterGain);
+      n.start(now);
+      n.stop(now + 0.13);
+    }
+  }
+
+  /** Crisp tactical firearm gunshot crack + punchy boom + outdoor tail */
+  public playGunshot(volume = 1.0): void {
+    this.unlock();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const vol = Math.max(0.08, Math.min(1.0, volume));
+
+    // Low muzzle blast thump
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(210, now);
+    osc.frequency.exponentialRampToValueAtTime(42, now + 0.09);
+    const og = this.ctx.createGain();
+    og.gain.setValueAtTime(0.65 * vol, now);
+    og.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    osc.connect(og);
+    og.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.12);
+
+    // Sharp supersonic crack & reverb tail
+    if (this.noiseBuffer) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1950, now);
+      bp.frequency.exponentialRampToValueAtTime(420, now + 0.24);
+      bp.Q.value = 0.65;
+      const ng = this.ctx.createGain();
+      ng.gain.setValueAtTime(0.85 * vol, now);
+      ng.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+      src.connect(bp);
+      bp.connect(ng);
+      ng.connect(this.masterGain);
+      src.start(now);
+      src.stop(now + 0.28);
+    }
+  }
+
+  /** Fast dodge-roll whoosh & jacket scuffle */
+  public playDodgeRoll(): void {
+    this.unlock();
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(340, now);
+    bp.frequency.exponentialRampToValueAtTime(920, now + 0.14);
+    bp.frequency.exponentialRampToValueAtTime(240, now + 0.34);
+    bp.Q.value = 1.2;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.32, now + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.38);
+  }
+
+  /** Subtle crisp interact/repair confirmation tone */
+  public playInteract(): void {
+    this.unlock();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(520, now);
+    osc.frequency.setValueAtTime(760, now + 0.07);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.18, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.21);
+  }
+
+  /** Gravelly low-formant Zombie snarl / scream! */
+  public playZombieGroan(pitch = 1.0, volume = 0.7): void {
+    this.unlock();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    const base = (72 + Math.random() * 18) * pitch;
+    osc.frequency.setValueAtTime(base * 1.25, now);
+    osc.frequency.linearRampToValueAtTime(base * 0.78, now + 0.48);
+
+    // Subtle raspy vibrato
+    const lfo = this.ctx.createOscillator();
+    lfo.frequency.value = 26;
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 9;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    const f1 = this.ctx.createBiquadFilter();
+    f1.type = 'bandpass';
+    f1.frequency.setValueAtTime(380 * pitch, now);
+    f1.Q.value = 3.8;
+
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.38 * volume, now + 0.07);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.52);
+
+    osc.connect(f1);
+    f1.connect(g);
+    g.connect(this.masterGain);
+    lfo.start(now);
+    osc.start(now);
+    lfo.stop(now + 0.54);
+    osc.stop(now + 0.54);
+  }
+
   public dispose(): void {
     try {
       this.realEngineSrc?.stop();

@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "generatedAt": "2026-11-25T11:20:03.598Z",
+  "version": 4,
+  "generatedAt": "2026-11-28T13:26:11.264Z",
   "count": 2,
   "cars": [
     {
@@ -21,6 +21,13 @@
     }
   ],
   "character": null,
-  "landmarkTashkent": null,
+  "zombie": null,
+  "soldier": null,
+  "landmarkTashkent": {
+    "fileName": "tashkent.glb",
+    "url": "./models/tashkent.glb",
+    "sizeBytes": 4620724,
+    "source": "models"
+  },
   "landmarkRegiston": null
 }

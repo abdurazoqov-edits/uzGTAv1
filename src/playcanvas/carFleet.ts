@@ -1,12 +1,6 @@
 import * as pc from 'playcanvas';
-import {
-  CarLicensePlateRig,
-  getDefaultPlatePreset,
-  LicensePlateConfig,
-  loadSavedPlateConfig,
-  PlateMountPreset,
-  savePlateConfig,
-} from './licensePlate';
+import { getSharedRpmHumanGlb } from './character';
+import { CarDamageRig } from './damage';
 import { createSeatedDriverEntity } from './npcs';
 import { OpenWorldHandle } from './world';
 
@@ -30,6 +24,8 @@ export interface ModelsManifest {
   version?: number;
   cars: CarManifestItem[];
   character?: SpecialAssetManifestItem | null;
+  zombie?: SpecialAssetManifestItem | null;
+  soldier?: SpecialAssetManifestItem | null;
   landmarkTashkent?: SpecialAssetManifestItem | null;
   landmarkRegiston?: SpecialAssetManifestItem | null;
 }
@@ -50,7 +46,7 @@ export interface PlayCanvasCar {
   userAdjust: pc.Entity;
   wheels: WheelRig[];
   nitroFlames: pc.Entity[];
-  plateRig: CarLicensePlateRig;
+  damageRig: CarDamageRig;
   spawnX: number;
   spawnZ: number;
   spawnYaw: number;
@@ -61,6 +57,7 @@ export interface PlayCanvasCar {
   flip180: boolean;
   scaleMul: number;
   carWidth: number;
+  carHeight: number;
   carLength: number;
 }
 
@@ -71,7 +68,6 @@ export interface CarSummary {
   flip180: boolean;
   scaleMul: number;
   wheelCount: number;
-  plate: LicensePlateConfig;
 }
 
 const TARGET_CAR_LENGTH = 4.45;
@@ -85,15 +81,6 @@ const PARKING_BAYS: Array<{ x: number; z: number; yaw: number }> = [
   { x: 12.8, z: 64.5, yaw: -14 },
   { x: -18.5, z: 66.5, yaw: 20 },
   { x: 18.5, z: 66.5, yaw: -20 },
-];
-
-const TRAFFIC_PLATES: Array<{ region: string; text: string }> = [
-  { region: '01', text: 'B 450 DA' },
-  { region: '01', text: 'C 888 CB' },
-  { region: '10', text: 'M 707 UZ' },
-  { region: '30', text: 'K 505 AA' },
-  { region: '01', text: 'Z 001 ZZ' },
-  { region: '70', text: 'R 321 AB' },
 ];
 
 const HELPER_MESH_RE = /colmesh|collision_?mesh|shadow_?plane|hitbox/i;
@@ -649,6 +636,8 @@ export class PlayCanvasCarFleet {
   public cars: PlayCanvasCar[] = [];
   public activeCarId: string | null = null;
   public manifestCharacter: SpecialAssetManifestItem | null = null;
+  public manifestZombie: SpecialAssetManifestItem | null = null;
+  public manifestSoldier: SpecialAssetManifestItem | null = null;
   public manifestTashkent: SpecialAssetManifestItem | null = null;
   public manifestRegiston: SpecialAssetManifestItem | null = null;
 
@@ -723,78 +712,12 @@ export class PlayCanvasCarFleet {
     };
   }
 
-  /**
-   * Scans actual center-strip bumper vertices (`|x| < 0.25m`) in normalized wrapper space
-   * so front and rear Uzbekistan license plates snap FLUSH onto the exact bumper surface of
-   * Cobalt, Damas, and ANY uploaded .glb car!
-   */
-  private detectBumperPlateMounts(
-    wrapper: pc.Entity,
-    renderComps: pc.RenderComponent[],
-    carName: string,
-    carLength: number
-  ): PlateMountPreset {
-    const base = getDefaultPlatePreset(carName, carLength);
-    wrapper.getWorldTransform();
-    const invWrapper = wrapper.getWorldTransform().clone().invert();
-    const toWrapper = new pc.Mat4();
-    const p = new pc.Vec3();
-
-    const frontTargetY = base.frontY;
-    const rearTargetY = base.rearY;
-    let bestFrontZ = Infinity;
-    let bestRearZ = -Infinity;
-    let anyFront = false;
-    let anyRear = false;
-
-    for (const rc of renderComps) {
-      if (!rc.enabled || !rc.entity.enabled) continue;
-      for (const mi of rc.meshInstances) {
-        if (!mi.visible || !mi.mesh || mi.instancingData) continue;
-        const pos: number[] = [];
-        const nVerts = mi.mesh.getPositions(pos);
-        if (nVerts < 3) continue;
-        toWrapper.mul2(invWrapper, mi.node.getWorldTransform());
-        const step = nVerts > 6000 ? 2 : 1;
-
-        for (let i = 0; i < nVerts; i += step) {
-          p.set(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
-          toWrapper.transformPoint(p, p);
-          if (Math.abs(p.x) > 0.24) continue;
-
-          // Front bumper strip around target front plate height
-          if (p.z < -carLength * 0.28 && Math.abs(p.y - frontTargetY) < 0.14) {
-            if (p.z < bestFrontZ) {
-              bestFrontZ = p.z;
-              anyFront = true;
-            }
-          }
-          // Rear bumper/trunk strip around target rear plate height
-          if (p.z > carLength * 0.28 && Math.abs(p.y - rearTargetY) < 0.16) {
-            if (p.z > bestRearZ) {
-              bestRearZ = p.z;
-              anyRear = true;
-            }
-          }
-        }
-      }
-    }
-
-    return {
-      frontY: frontTargetY,
-      frontZ: anyFront ? Number((bestFrontZ - 0.018).toFixed(2)) : Number(base.frontZ.toFixed(2)),
-      rearY: rearTargetY,
-      rearZ: anyRear ? Number((bestRearZ + 0.018).toFixed(2)) : Number(base.rearZ.toFixed(2)),
-      scale: base.scale,
-    };
-  }
-
   private normalizeGlbEntity(rawEntity: pc.Entity, carName: string): {
     wrapper: pc.Entity;
     wheels: WheelRig[];
     width: number;
+    height: number;
     length: number;
-    detectedPlate: PlateMountPreset;
   } {
     const wrapper = new pc.Entity('NormalizedGlbWrapper');
     const orientGroup = new pc.Entity('CarOrientGroup');
@@ -829,12 +752,14 @@ export class PlayCanvasCarFleet {
       node.getWorldTransform();
       const comps = node.findComponents('render') as pc.RenderComponent[];
       let combined: pc.BoundingBox | null = null;
+      const tmp = new pc.BoundingBox();
       for (const rc of comps) {
         if (!rc.enabled || !rc.entity.enabled) continue;
         for (const mi of rc.meshInstances) {
-          if (!mi.visible) continue;
-          if (!combined) combined = mi.aabb.clone();
-          else combined.add(mi.aabb);
+          if (!mi.visible || !mi.mesh) continue;
+          tmp.setFromTransformedAabb(mi.mesh.aabb, mi.node.getWorldTransform());
+          if (!combined) combined = tmp.clone();
+          else combined.add(tmp);
         }
       }
       return combined;
@@ -863,6 +788,7 @@ export class PlayCanvasCarFleet {
 
     const finalBounds = computeVisibleBounds(wrapper);
     const width = finalBounds ? Math.max(1.35, Math.min(2.5, finalBounds.halfExtents.x * 2)) : 1.9;
+    const height = finalBounds ? Math.max(1.15, Math.min(2.4, finalBounds.halfExtents.y * 2)) : 1.5;
     const length = finalBounds ? Math.max(2.8, Math.min(5.8, finalBounds.halfExtents.z * 2)) : 4.45;
 
     // 2. REAL WHEEL EXTRACTION (Spin + Front Steering for Cobalt, Damas & all future GLBs!)
@@ -883,11 +809,8 @@ export class PlayCanvasCarFleet {
       if (named.length > 0) wheels = named;
     }
 
-    // 3. Auto-detect exact front & rear bumper surface vertices for flush UZ license plates!
-    const detectedPlate = this.detectBumperPlateMounts(wrapper, renderComps, carName, length);
-
     this.app.root.removeChild(wrapper);
-    return { wrapper, wheels, width, length, detectedPlate };
+    return { wrapper, wheels, width, height, length };
   }
 
   private buildExhaustNitroFlames(parentWrapper: pc.Entity, carWidth: number, carLength: number): pc.Entity[] {
@@ -937,8 +860,8 @@ export class PlayCanvasCarFleet {
     modelWrapper: pc.Entity;
     wheels: WheelRig[];
     width: number;
+    height: number;
     length: number;
-    detectedPlate: PlateMountPreset;
   }): PlayCanvasCar {
     const bay = this.getBay(this.cars.length);
 
@@ -952,10 +875,8 @@ export class PlayCanvasCarFleet {
     tiltPivot.addChild(userAdjust);
     root.addChild(tiltPivot);
 
-    const plateKey = opts.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-    const plateCfg = loadSavedPlateConfig(plateKey, opts.name, opts.length, opts.detectedPlate);
-    const plateRig = new CarLicensePlateRig(this.app.graphicsDevice, opts.modelWrapper, plateCfg);
     const nitroFlames = this.buildExhaustNitroFlames(opts.modelWrapper, opts.width, opts.length);
+    const damageRig = new CarDamageRig(this.app.graphicsDevice, opts.modelWrapper, opts.length);
 
     const shadowPlane = new pc.Entity('CarContactShadow');
     shadowPlane.setLocalPosition(0, 0.03, 0);
@@ -979,7 +900,7 @@ export class PlayCanvasCarFleet {
       userAdjust,
       wheels: opts.wheels,
       nitroFlames,
-      plateRig,
+      damageRig,
       spawnX: bay.x,
       spawnZ: bay.z,
       spawnYaw: bay.yaw,
@@ -990,6 +911,7 @@ export class PlayCanvasCarFleet {
       flip180: false,
       scaleMul: 1.0,
       carWidth: opts.width,
+      carHeight: opts.height,
       carLength: opts.length,
     };
     this.cars.push(car);
@@ -1022,12 +944,16 @@ export class PlayCanvasCarFleet {
         const json = await res.json();
         const cars = Array.isArray(json?.cars) ? json.cars : [];
         this.manifestCharacter = json?.character || null;
+        this.manifestZombie = json?.zombie || null;
+        this.manifestSoldier = json?.soldier || null;
         this.manifestTashkent = json?.landmarkTashkent || null;
         this.manifestRegiston = json?.landmarkRegiston || null;
         return {
-          version: json?.version ?? 3,
+          version: json?.version ?? 4,
           cars,
           character: this.manifestCharacter,
+          zombie: this.manifestZombie,
+          soldier: this.manifestSoldier,
           landmarkTashkent: this.manifestTashkent,
           landmarkRegiston: this.manifestRegiston,
         };
@@ -1035,7 +961,14 @@ export class PlayCanvasCarFleet {
     } catch {
       // Ignore
     }
-    return { cars: [], character: null, landmarkTashkent: null, landmarkRegiston: null };
+    return {
+      cars: [],
+      character: null,
+      zombie: null,
+      soldier: null,
+      landmarkTashkent: null,
+      landmarkRegiston: null,
+    };
   }
 
   public async loadAllFromManifest(
@@ -1060,8 +993,8 @@ export class PlayCanvasCarFleet {
           modelWrapper: norm.wrapper,
           wheels: norm.wheels,
           width: norm.width,
+          height: norm.height,
           length: norm.length,
-          detectedPlate: norm.detectedPlate,
         });
       } catch (err) {
         console.warn(`[PlayCanvasCarFleet] Could not load ${item.fileName}:`, err);
@@ -1078,11 +1011,13 @@ export class PlayCanvasCarFleet {
 
   /**
    * Spawns live AI traffic cars on the city roads using the user's OWN .glb car models
-   * (Cobalt, Damas, and any future .glb cars — complete with spinning wheels, UZ plates & seated human drivers!).
+   * with steering front wheels, real-time crash denting, UZ plates & cabin-fitted human drivers!
    */
-  public spawnUserCarsAsRoadTraffic(world: OpenWorldHandle, isMobile: boolean): void {
+  public async spawnUserCarsAsRoadTraffic(world: OpenWorldHandle, isMobile: boolean): Promise<void> {
     const entries = Array.from(this.loadedContainers.values());
     if (entries.length === 0) return;
+
+    const rpmRes = await getSharedRpmHumanGlb(this.app);
 
     const totalTraffic = isMobile ? Math.min(4, entries.length * 2) : Math.min(6, entries.length * 3);
     for (let i = 0; i < totalTraffic; i++) {
@@ -1094,19 +1029,20 @@ export class PlayCanvasCarFleet {
         const holder = new pc.Entity(`TrafficUserCar_${src.name}_${i}`);
         holder.addChild(norm.wrapper);
 
-        // Seat a real human driver inside the cabin!
-        const driver = createSeatedDriverEntity(i, norm.length, src.name);
+        // Seat a real human driver STRICTLY inside the cabin below the roof!
+        const driver = createSeatedDriverEntity(
+          this.app,
+          i,
+          norm.width,
+          norm.height,
+          norm.length,
+          src.name,
+          rpmRes
+        );
         norm.wrapper.addChild(driver);
 
-        // Give each AI road car its own crisp auto-aligned UZ license plate
-        const plateInfo = TRAFFIC_PLATES[i % TRAFFIC_PLATES.length];
-        new CarLicensePlateRig(this.app.graphicsDevice, norm.wrapper, {
-          enabled: true,
-          region: plateInfo.region,
-          text: plateInfo.text,
-          style: i % 3 === 2 ? 'taxi' : 'white',
-          ...norm.detectedPlate,
-        });
+        // Attach real-time 3D crash denting to every AI traffic car too!
+        const damageRig = new CarDamageRig(this.app.graphicsDevice, norm.wrapper, norm.length);
 
         const sp = new pc.Entity('TrafficShadow');
         sp.setLocalPosition(0, 0.03, 0);
@@ -1121,13 +1057,19 @@ export class PlayCanvasCarFleet {
 
         const routeIndex = i % 3;
         const phase = (i * 0.27 + 0.12) % 1;
-        const speed = 9.5 + (i % 3) * 1.8;
+        const speed = 10.5 + (i % 3) * 1.6;
         world.registerTrafficCar(
           holder,
-          norm.wheels.map((w) => ({ spinPivot: w.spinPivot, radius: w.radius })),
+          norm.wheels.map((w) => ({
+            steerPivot: w.steerPivot,
+            spinPivot: w.spinPivot,
+            isFront: w.isFront,
+            radius: w.radius,
+          })),
           routeIndex,
           phase,
-          speed
+          speed,
+          { damageRig, carWidth: norm.width, carLength: norm.length }
         );
       } catch (err) {
         console.warn('[PlayCanvasCarFleet] Could not spawn road traffic clone:', err);
@@ -1164,23 +1106,33 @@ export class PlayCanvasCarFleet {
         modelWrapper: norm.wrapper,
         wheels: norm.wheels,
         width: norm.width,
+        height: norm.height,
         length: norm.length,
-        detectedPlate: norm.detectedPlate,
       });
 
       if (world) {
         try {
+          const rpmRes = await getSharedRpmHumanGlb(this.app);
           const tRaw = container.instantiateRenderEntity({ castShadows: false, receiveShadows: true });
           const tNorm = this.normalizeGlbEntity(tRaw, displayName);
           const holder = new pc.Entity(`TrafficLocalCar_${displayName}`);
           holder.addChild(tNorm.wrapper);
-          tNorm.wrapper.addChild(createSeatedDriverEntity(this.localCounter, tNorm.length, displayName));
+          tNorm.wrapper.addChild(
+            createSeatedDriverEntity(this.app, this.localCounter, tNorm.width, tNorm.height, tNorm.length, displayName, rpmRes)
+          );
+          const damageRig = new CarDamageRig(this.app.graphicsDevice, tNorm.wrapper, tNorm.length);
           world.registerTrafficCar(
             holder,
-            tNorm.wheels.map((w) => ({ spinPivot: w.spinPivot, radius: w.radius })),
+            tNorm.wheels.map((w) => ({
+              steerPivot: w.steerPivot,
+              spinPivot: w.spinPivot,
+              isFront: w.isFront,
+              radius: w.radius,
+            })),
             1,
             Math.random(),
-            10.5
+            11.0,
+            { damageRig, carWidth: tNorm.width, carLength: tNorm.length }
           );
         } catch {
           // Ignore traffic clone errors
@@ -1233,15 +1185,6 @@ export class PlayCanvasCarFleet {
     return car;
   }
 
-  public updateCarPlate(carId: string, patch: Partial<LicensePlateConfig>): PlayCanvasCar | null {
-    const car = this.getCarById(carId);
-    if (!car) return null;
-    car.plateRig.updateConfig(patch);
-    const plateKey = car.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-    savePlateConfig(plateKey, car.plateRig.config);
-    return car;
-  }
-
   public getSummaries(): CarSummary[] {
     return this.cars.map((c) => ({
       id: c.id,
@@ -1250,7 +1193,6 @@ export class PlayCanvasCarFleet {
       flip180: c.flip180,
       scaleMul: c.scaleMul,
       wheelCount: c.wheels.length,
-      plate: { ...c.plateRig.config },
     }));
   }
 }

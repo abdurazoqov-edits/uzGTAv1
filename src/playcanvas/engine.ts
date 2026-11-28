@@ -2,8 +2,7 @@ import * as pc from 'playcanvas';
 import { CarAudioEngine } from './audio';
 import { PlayCanvasCar, PlayCanvasCarFleet, CarSummary } from './carFleet';
 import { PlayableCharacter } from './character';
-import { LicensePlateConfig } from './licensePlate';
-import { NpcCrowdManager } from './npcs';
+import { CrashFxSystem } from './damage';
 import { buildPlayCanvasOpenWorld, OpenWorldHandle, TimeOfDay } from './world';
 
 export type CameraMode = 'chase' | 'hood' | 'orbit';
@@ -56,6 +55,82 @@ function detectMobileDevice(): boolean {
   return /Android|iPhone|iPad|iPod|Mobile|wv\)/i.test(ua);
 }
 
+interface BulletTracerSlot {
+  beam: pc.Entity;
+  flash: pc.Entity;
+  life: number;
+  maxLife: number;
+}
+
+class BulletTracerFx {
+  private readonly slots: BulletTracerSlot[] = [];
+  private cursor = 0;
+
+  constructor(app: pc.Application) {
+    const beamMat = new pc.StandardMaterial();
+    beamMat.diffuse.set(1.0, 0.92, 0.45);
+    beamMat.emissive.set(1.0, 0.82, 0.25);
+    beamMat.emissiveIntensity = 4.2;
+    beamMat.useLighting = false;
+    beamMat.update();
+
+    const flashMat = new pc.StandardMaterial();
+    flashMat.diffuse.set(1.0, 0.96, 0.72);
+    flashMat.emissive.set(1.0, 0.88, 0.42);
+    flashMat.emissiveIntensity = 5.0;
+    flashMat.useLighting = false;
+    flashMat.update();
+
+    for (let i = 0; i < 8; i++) {
+      const beam = new pc.Entity(`BulletTracer_${i}`);
+      beam.addComponent('render', { type: 'box', material: beamMat, castShadows: false, receiveShadows: false });
+      beam.enabled = false;
+      app.root.addChild(beam);
+
+      const flash = new pc.Entity(`MuzzleFlash_${i}`);
+      flash.addComponent('render', { type: 'sphere', material: flashMat, castShadows: false, receiveShadows: false });
+      flash.enabled = false;
+      app.root.addChild(flash);
+
+      this.slots.push({ beam, flash, life: 0, maxLife: 0.085 });
+    }
+  }
+
+  public spawn(ox: number, oy: number, oz: number, tx: number, ty: number, tz: number): void {
+    const slot = this.slots[this.cursor++ % this.slots.length];
+    const dx = tx - ox;
+    const dy = ty - oy;
+    const dz = tz - oz;
+    const dist = Math.max(0.25, Math.hypot(dx, dy, dz));
+
+    slot.beam.setLocalPosition((ox + tx) * 0.5, (oy + ty) * 0.5, (oz + tz) * 0.5);
+    slot.beam.lookAt(tx, ty, tz);
+    slot.beam.setLocalScale(0.036, 0.036, dist);
+    slot.beam.enabled = true;
+
+    slot.flash.setLocalPosition(ox, oy, oz);
+    slot.flash.setLocalScale(0.24, 0.24, 0.24);
+    slot.flash.enabled = true;
+
+    slot.life = slot.maxLife;
+  }
+
+  public update(dt: number): void {
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      if (s.life <= 0) continue;
+      s.life -= dt;
+      if (s.life <= 0) {
+        s.beam.enabled = false;
+        s.flash.enabled = false;
+      } else {
+        const k = s.life / s.maxLife;
+        s.flash.setLocalScale(0.26 * k, 0.26 * k, 0.26 * k);
+      }
+    }
+  }
+}
+
 export class PlayCanvasCarGame {
   public readonly canvas: HTMLCanvasElement;
   public readonly app: pc.Application;
@@ -64,10 +139,16 @@ export class PlayCanvasCarGame {
   public readonly world: OpenWorldHandle;
   public readonly fleet: PlayCanvasCarFleet;
   public readonly character: PlayableCharacter;
-  public readonly npcs: NpcCrowdManager;
+  public readonly crashFx: CrashFxSystem;
 
+  private readonly tracerFx: BulletTracerFx;
   private readonly cameraEntity: pc.Entity;
   private readonly callbacks: EngineCallbacks;
+  private crashSfxCooldown = 0;
+  private kickCooldown = 0;
+  private rollCooldown = 0;
+  private shootCooldown = 0;
+  private interactCooldown = 0;
 
   public controls: ControlState = {
     gas: false,
@@ -171,7 +252,8 @@ export class PlayCanvasCarGame {
     this.fleet = new PlayCanvasCarFleet(this.app);
     this.character = new PlayableCharacter(this.app);
     this.character.setVisible(false);
-    this.npcs = new NpcCrowdManager(this.app, this.isMobile);
+    this.crashFx = new CrashFxSystem(this.app);
+    this.tracerFx = new BulletTracerFx(this.app);
 
     this.bindCameraOrbitGestures();
     this.bindKeyboard();
@@ -196,12 +278,14 @@ export class PlayCanvasCarGame {
     await this.fleet.loadAllFromManifest(manifest, (label, pct) => {
       this.callbacks.onLoadProgress?.(label, pct);
     });
-    this.fleet.spawnUserCarsAsRoadTraffic(this.world, this.isMobile);
 
-    if (manifest.character?.url) {
-      this.callbacks.onLoadProgress?.('Loading character.glb…', 95);
-      await this.character.loadFromUrl(manifest.character.url, manifest.character.fileName);
-    }
+    this.callbacks.onLoadProgress?.('Spawning Road Traffic & Character…', 92);
+    await Promise.all([
+      this.fleet.spawnUserCarsAsRoadTraffic(this.world, this.isMobile),
+      manifest.character?.url
+        ? this.character.loadFromUrl(manifest.character.url, manifest.character.fileName)
+        : this.character.loadDefaultRealHuman(),
+    ]);
 
     const first = this.fleet.getActiveCar();
     if (first) {
@@ -221,8 +305,15 @@ export class PlayCanvasCarGame {
 
   private bindCameraOrbitGestures(): void {
     const c = this.canvas;
+    c.addEventListener('contextmenu', (e) => {
+      if (this.playerMode === 'foot') e.preventDefault();
+    });
     c.addEventListener('pointerdown', (e) => {
       this.audio.unlock();
+      if (e.button === 2 && e.pointerType === 'mouse' && this.playerMode === 'foot') {
+        this.triggerShoot();
+        return;
+      }
       if (e.button !== 0 && e.pointerType === 'mouse') return;
       this.isDraggingCamera = true;
       this.lastDragX = e.clientX;
@@ -296,6 +387,27 @@ export class PlayCanvasCarGame {
             this.triggerPunch();
           }
           break;
+        case 'KeyQ':
+          if (down && !e.repeat && this.playerMode === 'foot') {
+            this.triggerKick();
+          }
+          break;
+        case 'KeyV':
+        case 'ControlLeft':
+          if (down && !e.repeat && this.playerMode === 'foot') {
+            this.triggerRoll();
+          }
+          break;
+        case 'KeyG':
+          if (down && !e.repeat && this.playerMode === 'foot') {
+            this.triggerShoot();
+          }
+          break;
+        case 'KeyX':
+          if (down && !e.repeat && this.playerMode === 'foot') {
+            this.triggerInteract();
+          }
+          break;
         case 'ShiftLeft':
         case 'ShiftRight':
           this.controls.nitro = down;
@@ -334,8 +446,7 @@ export class PlayCanvasCarGame {
   }
 
   /**
-   * GTA On-Foot Melee Punch! Hits nearby citizens with realistic impact + vocal grunt,
-   * and triggers them to fight back!
+   * GTA On-Foot Melee Punch (`Punch_Left` / `Punch_Right`)
    */
   public triggerPunch(): void {
     this.audio.unlock();
@@ -344,19 +455,75 @@ export class PlayCanvasCarGame {
     this.punchCooldown = 0.36;
     this.character.triggerPunch();
     this.audio.playPunchSwing();
+  }
 
-    const res = this.npcs.handlePlayerPunch(this.character.x, this.character.z, this.character.yaw);
-    if (res.hit) {
-      // Turn player cleanly toward the struck citizen
-      const dx = res.npcX - this.character.x;
-      const dz = res.npcZ - this.character.z;
-      this.character.yaw = (Math.atan2(-dx, -dz) * 180) / Math.PI;
-      this.character.setPosition(this.character.x, this.character.y, this.character.z, this.character.yaw);
+  /**
+   * High Front Kick (`Kick_Left` / `Kick_Right`)
+   */
+  public triggerKick(): void {
+    this.audio.unlock();
+    if (this.playerMode !== 'foot' || this.kickCooldown > 0) return;
 
-      this.audio.playPunchHit();
-      this.audio.playHumanGrunt(res.voicePitch);
-      this.camShakeTimer = 0.14;
+    this.kickCooldown = 0.50;
+    this.character.triggerKick();
+    this.audio.playPunchSwing();
+  }
+
+  /**
+   * Tactical Dodge Roll (`Roll`) — Bursts forward!
+   */
+  public triggerRoll(): void {
+    this.audio.unlock();
+    if (this.playerMode !== 'foot' || this.rollCooldown > 0) return;
+
+    this.rollCooldown = 0.72;
+    const camYawRad = (this.footCamYawDeg * Math.PI) / 180;
+    const fwdX = -Math.sin(camYawRad);
+    const fwdZ = -Math.cos(camYawRad);
+    this.character.triggerRoll(fwdX, fwdZ);
+    this.audio.playDodgeRoll();
+  }
+
+  /**
+   * Gun Shoot (`Gun_Shoot` / `Idle_Gun_Shoot`) — Fires glowing tracer along aim direction!
+   */
+  public triggerShoot(): void {
+    this.audio.unlock();
+    if (this.playerMode !== 'foot' || this.shootCooldown > 0) return;
+
+    this.shootCooldown = 0.28;
+    this.character.yaw = this.footCamYawDeg;
+    this.character.setPosition(this.character.x, this.character.y, this.character.z, this.character.yaw);
+    this.character.triggerShoot();
+    this.audio.playGunshot(1.0);
+    this.camShakeTimer = Math.max(this.camShakeTimer, 0.08);
+
+    const yawRad = (this.character.yaw * Math.PI) / 180;
+    const dirX = -Math.sin(yawRad);
+    const dirZ = -Math.cos(yawRad);
+    const ox = this.character.x + dirX * 0.65;
+    const oy = this.character.y + 1.38;
+    const oz = this.character.z + dirZ * 0.65;
+
+    this.tracerFx.spawn(ox, oy, oz, ox + dirX * 48, oy, oz + dirZ * 48);
+  }
+
+  /**
+   * Interact (`Interact`) — Repairs nearby damaged car!
+   */
+  public triggerInteract(): void {
+    this.audio.unlock();
+    if (this.playerMode !== 'foot' || this.interactCooldown > 0) return;
+
+    this.interactCooldown = 0.80;
+    this.character.triggerInteract();
+    this.audio.playInteract();
+
+    const near = this.fleet.findNearestCar(this.character.x, this.character.z, 5.5);
+    if (near) {
+      near.damageRig.repair();
     }
+    this.emitTelemetryNow();
   }
 
   public toggleMute(): boolean {
@@ -474,13 +641,6 @@ export class PlayCanvasCarGame {
     this.emitTelemetryNow();
   }
 
-  public updateActiveCarPlate(patch: Partial<LicensePlateConfig>): void {
-    const car = this.fleet.getActiveCar();
-    if (!car) return;
-    this.fleet.updateCarPlate(car.id, patch);
-    this.emitTelemetryNow();
-  }
-
   public async importLocalGlb(file: File): Promise<PlayCanvasCar> {
     const car = await this.fleet.importLocalGlbFile(file, this.world);
     this.selectCar(car.id);
@@ -542,6 +702,7 @@ export class PlayCanvasCarGame {
     car.root.setLocalPosition(car.x, car.y, car.z);
     car.root.setLocalEulerAngles(0, car.yaw, 0);
     car.tiltPivot.setLocalEulerAngles(0, 0, 0);
+    car.damageRig.repair();
     this.snapCameraToCar(car);
     this.emitTelemetryNow();
   }
@@ -593,7 +754,12 @@ export class PlayCanvasCarGame {
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
     this.elapsedSec += dt;
     if (this.punchCooldown > 0) this.punchCooldown = Math.max(0, this.punchCooldown - dt);
+    if (this.kickCooldown > 0) this.kickCooldown = Math.max(0, this.kickCooldown - dt);
+    if (this.rollCooldown > 0) this.rollCooldown = Math.max(0, this.rollCooldown - dt);
+    if (this.shootCooldown > 0) this.shootCooldown = Math.max(0, this.shootCooldown - dt);
+    if (this.interactCooldown > 0) this.interactCooldown = Math.max(0, this.interactCooldown - dt);
     if (this.camShakeTimer > 0) this.camShakeTimer = Math.max(0, this.camShakeTimer - dt);
+    if (this.crashSfxCooldown > 0) this.crashSfxCooldown = Math.max(0, this.crashSfxCooldown - dt);
 
     const playerPos = new pc.Vec3(0, 0, 0);
 
@@ -612,24 +778,14 @@ export class PlayCanvasCarGame {
     }
 
     this.world.update(dt, this.elapsedSec, playerPos);
+    this.crashFx.update(dt);
+    this.tracerFx.update(dt);
 
-    // Update living city population (walkers, building citizens, swimmers & fight-back combat!)
-    this.npcs.update(
-      dt,
-      this.elapsedSec,
-      playerPos.x,
-      playerPos.z,
-      this.playerMode === 'foot',
-      this.world.getTerrainHeight,
-      () => {
-        if (this.playerMode === 'foot') {
-          this.character.triggerHitRecoil();
-          this.audio.playPunchHit();
-          this.audio.playHumanGrunt(0.92);
-          this.camShakeTimer = 0.22;
-        }
-      }
-    );
+    for (let i = 0; i < this.fleet.cars.length; i++) {
+      const fc = this.fleet.cars[i];
+      const spd = fc.id === this.fleet.activeCarId && this.playerMode === 'car' ? Math.hypot(this.velX, this.velZ) : 0;
+      fc.damageRig.updateSmoke(dt, spd);
+    }
 
     if (this.elapsedSec - this.lastTelemetryTime >= 0.05) {
       this.emitTelemetryNow();
@@ -637,6 +793,22 @@ export class PlayCanvasCarGame {
   };
 
   private stepOnFootPhysics(dt: number): void {
+
+    // Dodge Roll burst movement
+    if (this.character.isRolling()) {
+      const rd = this.character.getRollDirection();
+      const rollSpeed = 8.4;
+      const col = this.resolveWorldCollisions(
+        this.character.x + rd.x * rollSpeed * dt,
+        this.character.z + rd.z * rollSpeed * dt,
+        0.55
+      );
+      const groundY = this.world.getTerrainHeight(col.x, col.z);
+      this.character.setPosition(col.x, groundY, col.z, this.character.yaw);
+      this.character.updateAnimation(dt, rollSpeed, true, 1, 0);
+      return;
+    }
+
     const keyFwd = (this.controls.gas ? 1 : 0) - (this.controls.brake ? 1 : 0);
     const keyStrafe = (this.controls.right ? 1 : 0) - (this.controls.left ? 1 : 0);
 
@@ -681,9 +853,8 @@ export class PlayCanvasCarGame {
       }
     }
 
-    // Character's head physically tilts UP into the sky when looking at Tashkent TV Tower!
     this.character.setLookPitch(-this.footCamPitchDeg);
-    this.character.updateAnimation(dt, moveSpeed, running);
+    this.character.updateAnimation(dt, moveSpeed, running, inFwd, inRight);
 
     this.audio.updateWorld({
       inCar: false,
@@ -818,12 +989,152 @@ export class PlayCanvasCarGame {
 
     const rawNextX = car.x + this.velX * dt;
     const rawNextZ = car.z + this.velZ * dt;
+    const preHitSpeed = Math.hypot(this.velX, this.velZ);
     const col = this.resolveWorldCollisions(rawNextX, rawNextZ, 1.45);
-    if (col.hitX) this.velX *= -0.25;
-    if (col.hitZ) this.velZ *= -0.25;
+    if (col.hitX || col.hitZ) {
+      if (preHitSpeed > 5.0 && this.crashSfxCooldown <= 0) {
+        const intensity = Math.min(1.0, (preHitSpeed - 3.5) / 22.0);
+        const moveLen = Math.max(0.01, preHitSpeed);
+        const dirX = this.velX / moveLen;
+        const dirZ = this.velZ / moveLen;
+        const hitPt = new pc.Vec3(
+          col.x + dirX * (car.carLength * 0.44),
+          car.y + 0.68,
+          col.z + dirZ * (car.carLength * 0.44)
+        );
+        const pushIn = new pc.Vec3(-dirX, 0.08, -dirZ).normalize();
+        car.root.setLocalPosition(col.x, car.y, col.z);
+        car.root.getWorldTransform();
+        car.damageRig.applyImpact(hitPt, pushIn, intensity);
+        this.crashFx.spawnImpactSparks(hitPt, pushIn, intensity);
+        this.audio.playCarCrash(intensity);
+        this.camShakeTimer = Math.max(this.camShakeTimer, 0.14 + intensity * 0.18);
+        this.crashSfxCooldown = 0.22;
+      }
+      if (col.hitX) this.velX *= -0.25;
+      if (col.hitZ) this.velZ *= -0.25;
+    }
+
+    let nextX = col.x;
+    let nextZ = col.z;
+
+    // REAL CAR-TO-CAR COLLISIONS WITH AI ROAD TRAFFIC (Both cars visibly crumple & bounce!)
+    const playerRadius = Math.max(1.35, (car.carWidth + car.carLength) * 0.25);
+    for (let i = 0; i < this.world.trafficAgents.length; i++) {
+      const agent = this.world.trafficAgents[i];
+      const dx = nextX - agent.x;
+      const dz = nextZ - agent.z;
+      const agentRadius = Math.max(1.35, (agent.carWidth + agent.carLength) * 0.25);
+      const minDist = playerRadius + agentRadius - 0.18;
+      const distSq = dx * dx + dz * dz;
+
+      if (distSq < minDist * minDist && distSq > 0.0001) {
+        const dist = Math.sqrt(distSq);
+        const nx = dx / dist; // normal from traffic -> player
+        const nz = dz / dist;
+        const overlap = minDist - dist;
+
+        // Separate cars cleanly
+        nextX += nx * overlap * 0.72;
+        nextZ += nz * overlap * 0.72;
+
+        const aYawRad = (agent.yaw * Math.PI) / 180;
+        const aVx = -Math.sin(aYawRad) * agent.curSpeed;
+        const aVz = -Math.cos(aYawRad) * agent.curSpeed;
+        const relVx = this.velX - aVx;
+        const relVz = this.velZ - aVz;
+        const closingSpeed = -(relVx * nx + relVz * nz);
+
+        if (closingSpeed > 0.4) {
+          const impulse = closingSpeed * 0.72;
+          this.velX += nx * impulse * 0.62;
+          this.velZ += nz * impulse * 0.62;
+
+          if (closingSpeed > 2.8 && this.crashSfxCooldown <= 0) {
+            const intensity = Math.min(1.0, (closingSpeed - 2.0) / 18.0);
+            const hitPt = new pc.Vec3(
+              agent.x + nx * (agentRadius * 0.85),
+              car.y + 0.68,
+              agent.z + nz * (agentRadius * 0.85)
+            );
+            const intoPlayer = new pc.Vec3(nx, 0.08, nz).normalize();
+            const intoAgent = new pc.Vec3(-nx, 0.08, -nz).normalize();
+
+            car.root.setLocalPosition(nextX, car.y, nextZ);
+            car.root.getWorldTransform();
+            car.damageRig.applyImpact(hitPt, intoPlayer, intensity);
+            this.world.applyTrafficCrash(
+              agent,
+              -nx * impulse * 1.15,
+              -nz * impulse * 1.15,
+              hitPt,
+              intoAgent,
+              intensity
+            );
+            this.crashFx.spawnImpactSparks(hitPt, intoPlayer, intensity);
+            this.audio.playCarCrash(intensity);
+            this.camShakeTimer = Math.max(this.camShakeTimer, 0.16 + intensity * 0.22);
+            this.crashSfxCooldown = 0.22;
+          }
+        }
+      }
+    }
+
+    // REAL CAR-TO-CAR COLLISIONS WITH OTHER PARKED FLEET CARS (Both cars dent & shift!)
+    for (let i = 0; i < this.fleet.cars.length; i++) {
+      const other = this.fleet.cars[i];
+      if (other.id === car.id) continue;
+      const dx = nextX - other.x;
+      const dz = nextZ - other.z;
+      const otherRadius = Math.max(1.35, (other.carWidth + other.carLength) * 0.25);
+      const minDist = playerRadius + otherRadius - 0.18;
+      const distSq = dx * dx + dz * dz;
+
+      if (distSq < minDist * minDist && distSq > 0.0001) {
+        const dist = Math.sqrt(distSq);
+        const nx = dx / dist;
+        const nz = dz / dist;
+        const overlap = minDist - dist;
+
+        nextX += nx * overlap * 0.58;
+        nextZ += nz * overlap * 0.58;
+        other.x -= nx * overlap * 0.42;
+        other.z -= nz * overlap * 0.42;
+        other.y = this.world.getTerrainHeight(other.x, other.z);
+        other.root.setLocalPosition(other.x, other.y, other.z);
+
+        const closingSpeed = -(this.velX * nx + this.velZ * nz);
+        if (closingSpeed > 0.4) {
+          const impulse = closingSpeed * 0.7;
+          this.velX += nx * impulse * 0.65;
+          this.velZ += nz * impulse * 0.65;
+
+          if (closingSpeed > 2.8 && this.crashSfxCooldown <= 0) {
+            const intensity = Math.min(1.0, (closingSpeed - 2.0) / 18.0);
+            const hitPt = new pc.Vec3(
+              other.x + nx * (otherRadius * 0.85),
+              car.y + 0.68,
+              other.z + nz * (otherRadius * 0.85)
+            );
+            const intoPlayer = new pc.Vec3(nx, 0.08, nz).normalize();
+            const intoOther = new pc.Vec3(-nx, 0.08, -nz).normalize();
+
+            car.root.setLocalPosition(nextX, car.y, nextZ);
+            car.root.getWorldTransform();
+            other.root.getWorldTransform();
+            car.damageRig.applyImpact(hitPt, intoPlayer, intensity);
+            other.damageRig.applyImpact(hitPt, intoOther, intensity);
+            this.crashFx.spawnImpactSparks(hitPt, intoPlayer, intensity);
+            this.audio.playCarCrash(intensity);
+            this.camShakeTimer = Math.max(this.camShakeTimer, 0.16 + intensity * 0.22);
+            this.crashSfxCooldown = 0.22;
+          }
+        }
+      }
+    }
 
     const prevGround = this.world.getTerrainHeight(car.x, car.z);
-    const nextGround = this.world.getTerrainHeight(col.x, col.z);
+    const nextGround = this.world.getTerrainHeight(nextX, nextZ);
 
     if (this.grounded) {
       const slopeRise = (nextGround - prevGround) / Math.max(dt, 0.005);
@@ -844,8 +1155,8 @@ export class PlayCanvasCarGame {
       }
     }
 
-    car.x = col.x;
-    car.z = col.z;
+    car.x = nextX;
+    car.z = nextZ;
 
     const frontGround = this.world.getTerrainHeight(car.x + nFwdX * 1.4, car.z + nFwdZ * 1.4);
     const rearGround = this.world.getTerrainHeight(car.x - nFwdX * 1.4, car.z - nFwdZ * 1.4);
@@ -971,6 +1282,12 @@ export class PlayCanvasCarGame {
       const tgtAlpha = 1 - Math.exp(-13.0 * dt);
       this.camPos.lerp(this.camPos, desiredPos, posAlpha);
       this.camTarget.lerp(this.camTarget, desiredTarget, tgtAlpha);
+    }
+
+    if (this.camShakeTimer > 0) {
+      const s = this.camShakeTimer * 0.85;
+      this.camPos.x += (Math.random() - 0.5) * s;
+      this.camPos.y += (Math.random() - 0.5) * s;
     }
 
     this.cameraEntity.setLocalPosition(this.camPos);
